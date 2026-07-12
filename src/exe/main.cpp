@@ -1337,6 +1337,9 @@ static void RenderUI() {
 
     float vol = g_customBgmVolume.load();
     float volPct = vol * 100.0f;
+    float sliderW = 300.0f;
+    ImGui::SetCursorPosX((displaySize.x - sliderW) / 2.0f);
+    ImGui::PushItemWidth(sliderW);
     if (ImGui::SliderFloat("##vol", &volPct, 0.0f, 500.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
         vol = volPct / 100.0f;
         g_customBgmVolume.store(vol);
@@ -1344,6 +1347,7 @@ static void RenderUI() {
         if (g_pShared) g_pShared->volume = vol;
         SaveSettings();
     }
+    ImGui::PopItemWidth();
 
     ImGui::Spacing();
     ImGui::Separator();
