@@ -563,7 +563,7 @@ private:
         HAACDecoder dec = AACInitDecoder();
         if (!dec) return false;
         std::vector<int16_t> pcm;
-        pcm.reserve(data.size() * 2);
+        pcm.reserve(4096);
         short outbuf[2048 * 2];
         unsigned char* inbuf = (unsigned char*)data.data();
         int bytesLeft = (int)data.size();

@@ -23,6 +23,8 @@ private:
     IXAudio2MasteringVoice* pMasterVoice = nullptr;
     std::vector<ActiveVoice> m_voices;
     std::mutex m_mutex;
+    bool m_comInit = false;
+    bool m_trackFinishedPending = false;
 
 public:
     std::function<void()> OnTrackFinished;
@@ -31,12 +33,13 @@ public:
         StopAll();
         if (pMasterVoice) pMasterVoice->DestroyVoice();
         if (pXAudio2) pXAudio2->Release();
-        CoUninitialize();
+        if (m_comInit) CoUninitialize();
     }
 
     bool Init() {
         HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (FAILED(hr)) return false;
+        m_comInit = true;
         hr = XAudio2Create(&pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
         if (FAILED(hr)) return false;
         hr = pXAudio2->CreateMasteringVoice(&pMasterVoice, XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, NULL, NULL, AudioCategory_GameEffects);
@@ -45,7 +48,6 @@ public:
     }
 
     void Update() {
-        std::function<void()> trackFinished;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             for (auto it = m_voices.begin(); it != m_voices.end(); ) {
@@ -72,13 +74,16 @@ public:
                     delete[] it->pBuffer;
                     it = m_voices.erase(it);
                     if (wasBgm && OnTrackFinished)
-                        trackFinished = OnTrackFinished;
+                        m_trackFinishedPending = true;
                 } else {
                     ++it;
                 }
             }
         }
-        if (trackFinished) trackFinished();
+        if (m_trackFinishedPending) {
+            m_trackFinishedPending = false;
+            if (OnTrackFinished) OnTrackFinished();
+        }
     }
 
     void StopAll() {

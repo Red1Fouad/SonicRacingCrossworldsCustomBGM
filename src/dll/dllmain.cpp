@@ -154,7 +154,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         break;
     case DLL_PROCESS_DETACH:
         g_running = false;
-        if (g_shared) g_shared->active = false;
+        CleanupCRIHooks();
+        if (g_shared) { g_shared->active = false; UnmapViewOfFile(g_shared); g_shared = nullptr; }
+        if (g_sharedMapping) { CloseHandle(g_sharedMapping); g_sharedMapping = nullptr; }
         break;
     }
     return TRUE;

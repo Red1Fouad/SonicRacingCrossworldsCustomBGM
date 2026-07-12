@@ -89,6 +89,7 @@ static void Hook_SetCueName(void* player, void* acb, const char* cueName) {
     char safeName[256];
     if (SafeReadString(cueName, safeName, sizeof(safeName))) {
         std::lock_guard<std::mutex> lock(g_playerMutex);
+        if (g_playerCueNames.size() > 500) { g_playerCueNames.clear(); g_playerAcbFiles.clear(); }
         g_playerCueNames[player] = safeName;
         if (g_acbFiles.count(acb))
             g_playerAcbFiles[player] = g_acbFiles[acb];
@@ -195,4 +196,14 @@ static bool InitCRIHooks(CRIHookCallbacks callbacks) {
     if (addr) fpCategoryGetVolume = (criAtomExCategory_GetVolume_t)addr;
 
     return fpStart != nullptr;
+}
+
+static void CleanupCRIHooks() {
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
+    std::lock_guard<std::mutex> lock(g_playerMutex);
+    g_playerCueNames.clear();
+    g_playerCategoryIds.clear();
+    g_acbFiles.clear();
+    g_playerAcbFiles.clear();
 }
