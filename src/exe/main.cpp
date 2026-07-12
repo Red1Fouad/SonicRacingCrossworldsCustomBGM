@@ -98,6 +98,7 @@ static bool g_trayIconVisible = false;
 static NOTIFYICONDATAA g_nid = {};
 static HICON g_trayIcon = nullptr;
 static std::string g_lastNotifiedTrack;
+static std::atomic<bool> g_settingsLoaded{ false };
 
 struct RecentEntry { std::string filename; int poolIndex; };
 static std::vector<RecentEntry> g_recentTracks;
@@ -561,6 +562,7 @@ static void PollControllerRecording() {
 }
 
 static void SaveSettings() {
+    if (!g_settingsLoaded.load()) return;
     std::ofstream out(GetExeDir() + "\\settings.txt");
     if (out.is_open()) {
         out << "PlayNewMusic: " << (g_playNewMusic ? "true" : "false") << "\n";
@@ -738,6 +740,8 @@ static void AudioThread() {
     }
 }
 
+static void ApplyTheme(int idx);
+
 static void InitAudio() {
     std::string dir = GetExeDir();
     LoadMusicFromDir(dir + "\\music", g_bgmPool);
@@ -780,6 +784,8 @@ static void InitAudio() {
         g_audio.OnTrackFinished = OnTrackFinished;
         g_audioInitialized.store(true);
     }
+    g_settingsLoaded.store(true);
+    ApplyTheme(g_themeIndex);
 }
 
 static void SetAutostart(bool enable) {
