@@ -342,6 +342,8 @@ static const char* GpButtonToString(int btn) {
     case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return "D-Down";
     case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return "D-Left";
     case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return "D-Right";
+    case 100: return "L2";
+    case 101: return "R2";
     default: return "?";
     }
 }
@@ -375,8 +377,17 @@ static bool IsBindingActive(const HotkeyBinding& hb) {
     }
     if (hb.gp.buttons[0] != -1 && g_gameController) {
         bool ok = true;
-        for (int i = 0; i < 5 && hb.gp.buttons[i] != -1; i++)
-            if (!SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)hb.gp.buttons[i])) { ok = false; break; }
+        for (int i = 0; i < 5 && hb.gp.buttons[i] != -1; i++) {
+            int btn = hb.gp.buttons[i];
+            bool pressed;
+            if (btn == 100)
+                pressed = SDL_GameControllerGetAxis(g_gameController, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8192;
+            else if (btn == 101)
+                pressed = SDL_GameControllerGetAxis(g_gameController, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8192;
+            else
+                pressed = SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)btn);
+            if (!pressed) { ok = false; break; }
+        }
         if (ok) return true;
     }
     return false;
@@ -500,6 +511,18 @@ static void PollControllerRecording() {
             }
         }
     }
+    auto addTrigger = [&](int id) {
+        any = true;
+        bool found = false;
+        for (int i = 0; i < 5; i++) { if (g_gpPeakButtons[i] == id) { found = true; break; } }
+        if (!found) {
+            for (int i = 0; i < 4; i++) {
+                if (g_gpPeakButtons[i] == -1) { g_gpPeakButtons[i] = id; break; }
+            }
+        }
+    };
+    if (SDL_GameControllerGetAxis(g_gameController, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 8192) addTrigger(100);
+    if (SDL_GameControllerGetAxis(g_gameController, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8192) addTrigger(101);
     if (any) {
         g_gpWasPressed = true;
     } else if (g_gpWasPressed) {
