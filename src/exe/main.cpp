@@ -475,8 +475,10 @@ static void PollKeyboardRecording() {
         bool down = (GetAsyncKeyState(k) & 0x8000) != 0;
         if (down && !g_prevKeyState[k]) {
             if (k == VK_ESCAPE) {
+                g_hotkeys[g_recordingAction].kb.keys[0] = -1;
                 g_recordingKeyboard = false;
                 g_recordingAction = -1;
+                SaveHotkeys();
             } else {
                 KeyBinding& kb = g_hotkeys[g_recordingAction].kb;
                 memset(&kb, -1, sizeof(kb));
@@ -498,6 +500,13 @@ static void PollKeyboardRecording() {
 
 static void PollControllerRecording() {
     if (!g_recordingController || g_recordingAction < 0 || !g_gameController) return;
+    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
+        g_hotkeys[g_recordingAction].gp.buttons[0] = -1;
+        g_recordingController = false;
+        g_recordingAction = -1;
+        SaveHotkeys();
+        return;
+    }
     bool any = false;
     for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
         if (SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)b)) {
