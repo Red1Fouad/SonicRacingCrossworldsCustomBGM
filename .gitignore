@@ -10,6 +10,7 @@
 *.zip
 *.ini
 *.txt
+*.res
 imgui.ini
 settings.txt
 music/
