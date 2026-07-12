@@ -883,6 +883,7 @@ static void DoInject(DWORD pid) {
 }
 
 static void DoDisconnect() {
+    if (g_audioInitialized.load()) g_audio.StopCategoryImmediate(0);
     CloseSharedMemory();
     g_injected.store(false);
     g_targetPid = 0;
@@ -891,6 +892,7 @@ static void DoDisconnect() {
         g_currentTrackName.clear();
     }
     g_bgmActive.store(false);
+    g_paused.store(false);
     SetWindowTextA(g_hWnd, WINDOW_TITLE);
 }
 
@@ -1495,7 +1497,7 @@ static void RenderUI() {
 
         ImGui::Text("Controls");
         ImGui::Indent();
-        if (ImGui::Button("Configure Hotkeys...")) g_showHotkeyWindow = true;
+        if (ImGui::Button("Configure Hotkeys...")) { g_showHotkeyWindow = true; ImGui::CloseCurrentPopup(); }
         ImGui::Unindent();
 
         ImGui::Spacing();
@@ -1619,6 +1621,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     SetProcessDPIAware();
     g_hInst = hInstance;
+
+    HANDLE hMutex = CreateMutexA(NULL, FALSE, "SonicCustomBGM_SingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowA("SonicCustomBGM_ImGui", WINDOW_TITLE);
+        if (existing) {
+            ShowWindow(existing, SW_RESTORE);
+            SetForegroundWindow(existing);
+        }
+        return 0;
+    }
 
     SECURITY_DESCRIPTOR sd;
     InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
