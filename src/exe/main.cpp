@@ -785,7 +785,6 @@ static void InitAudio() {
         g_audioInitialized.store(true);
     }
     g_settingsLoaded.store(true);
-    ApplyTheme(g_themeIndex);
 }
 
 static void SetAutostart(bool enable) {
@@ -1770,6 +1769,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     auto lastHotkeyCheck = std::chrono::steady_clock::now();
     auto lastMuteCheck = std::chrono::steady_clock::now();
+    bool themeAppliedAfterLoad = false;
 
     bool running = true;
     MSG msg;
@@ -1780,6 +1780,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             DispatchMessageA(&msg);
         }
         if (!running) break;
+
+        if (!themeAppliedAfterLoad && g_settingsLoaded.load()) {
+            ApplyTheme(g_themeIndex);
+            themeAppliedAfterLoad = true;
+        }
 
         {
             SDL_Event sdle;
