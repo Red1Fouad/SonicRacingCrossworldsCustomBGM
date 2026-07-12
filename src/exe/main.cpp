@@ -1365,13 +1365,16 @@ static void RenderUI() {
     ImGui::Spacing();
 
     static int currentTab = 0;
-    const char* tabNames[] = { "BGM", "Lobby", "Title", "Recent" };
-    int counts[] = { (int)g_bgmPool.size(), (int)g_lobbyPool.size(), (int)g_titlePool.size(), (int)g_recentTracks.size() };
+    const char* tabNames[] = { "BGM", "Lobby", "Title", "Recent", "Credits" };
+    int counts[] = { (int)g_bgmPool.size(), (int)g_lobbyPool.size(), (int)g_titlePool.size(), (int)g_recentTracks.size(), 0 };
 
     if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_NoCloseWithMiddleMouseButton)) {
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             char label[64];
-            snprintf(label, sizeof(label), "%s (%d)", tabNames[i], counts[i]);
+            if (i == 4)
+                snprintf(label, sizeof(label), "%s", tabNames[i]);
+            else
+                snprintf(label, sizeof(label), "%s (%d)", tabNames[i], counts[i]);
             if (ImGui::BeginTabItem(label)) {
                 currentTab = i;
                 ImGui::EndTabItem();
@@ -1388,7 +1391,7 @@ static void RenderUI() {
 
     float trackListH = ImGui::GetContentRegionAvail().y - 110.0f;
     if (trackListH < 100.0f) trackListH = 100.0f;
-    ImGui::BeginChild("##TrackList", ImVec2(0, trackListH), true);
+    ImGui::BeginChild("##TrackList", ImVec2(0, trackListH), currentTab != 4);
 
     std::string lastNotified;
     {
@@ -1428,6 +1431,40 @@ static void RenderUI() {
                 if (isPlaying) ImGui::PopStyleColor();
             }
         }
+    } else if (currentTab == 4) {
+        ImGui::Spacing();
+        ImGui::PushFont(g_fontBold);
+        ImGui::Text("Sonic Custom BGM");
+        ImGui::PopFont();
+        ImGui::TextDisabled("Replace game BGM with your own music");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::PushFont(g_fontBold);
+        ImGui::Text("Developer");
+        ImGui::PopFont();
+        ImGui::TextDisabled("  RED1");
+        ImGui::Spacing();
+
+        ImGui::PushFont(g_fontBold);
+        ImGui::Text("Special Thanks");
+        ImGui::PopFont();
+        ImGui::TextDisabled("  RyoTune - CRI Atom / ACB information (Ryo Framework)");
+        ImGui::Spacing();
+
+        ImGui::PushFont(g_fontBold);
+        ImGui::Text("Libraries");
+        ImGui::PopFont();
+        ImGui::TextDisabled("  Dear ImGui          - Omar Cornut");
+        ImGui::TextDisabled("  MinHook             - Tsuda Kagewo");
+        ImGui::TextDisabled("  SDL2                - Sam Lantinga");
+        ImGui::TextDisabled("  dr_mp3              - David Reid");
+        ImGui::TextDisabled("  dr_flac             - David Reid");
+        ImGui::TextDisabled("  stb_vorbis          - Sean Barrett");
+        ImGui::TextDisabled("  libhelix-aac        - Ahead Software / RealNetworks");
+        ImGui::TextDisabled("  XAudio2             - Microsoft");
+        ImGui::TextDisabled("  Direct3D 9          - Microsoft");
     } else {
         std::vector<CompressedAudio>* pools[] = { &g_bgmPool, &g_lobbyPool, &g_titlePool };
         std::vector<CompressedAudio>* pool = pools[currentTab];
