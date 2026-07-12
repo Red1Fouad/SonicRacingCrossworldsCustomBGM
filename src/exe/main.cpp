@@ -862,14 +862,13 @@ static void ShowNowPlayingNotification(const char* trackName) {
 }
 
 static void OpenSharedMemory() {
-    if (g_hSharedMap) return;
-    g_hSharedMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SHARED_MEMORY_NAME);
-    if (g_hSharedMap) g_pShared = (SharedMemory*)MapViewOfFile(g_hSharedMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMemory));
+    if (g_hSharedMap && g_pShared) return;
+    if (!g_hSharedMap) g_hSharedMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SHARED_MEMORY_NAME);
+    if (g_hSharedMap && !g_pShared) g_pShared = (SharedMemory*)MapViewOfFile(g_hSharedMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMemory));
 }
 
 static void CloseSharedMemory() {
     if (g_pShared) { UnmapViewOfFile(g_pShared); g_pShared = nullptr; }
-    if (g_hSharedMap) { CloseHandle(g_hSharedMap); g_hSharedMap = nullptr; }
 }
 
 static void DoInject(DWORD pid) {
@@ -1611,6 +1610,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_scanRunning = false;
         g_audioThreadRunning = false;
         CloseSharedMemory();
+        if (g_hSharedMap) { CloseHandle(g_hSharedMap); g_hSharedMap = nullptr; }
         CleanupDevice();
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
