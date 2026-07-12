@@ -397,8 +397,6 @@ static void SetDefaultHotkeys() {
     memset(g_hotkeys, -1, sizeof(g_hotkeys));
     g_hotkeys[HOTKEY_SKIP].kb.keys[0] = VK_CONTROL;
     g_hotkeys[HOTKEY_SKIP].kb.keys[1] = VK_RIGHT;
-    g_hotkeys[HOTKEY_SKIP].gp.buttons[0] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
-    g_hotkeys[HOTKEY_SKIP].gp.buttons[1] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
     g_hotkeys[HOTKEY_PREV].kb.keys[0] = VK_CONTROL;
     g_hotkeys[HOTKEY_PREV].kb.keys[1] = VK_LEFT;
     g_hotkeys[HOTKEY_VOLUP].kb.keys[0] = VK_CONTROL;
