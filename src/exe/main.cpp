@@ -249,6 +249,24 @@ static void LoadMusicFromDir(const std::string& dir, std::vector<CompressedAudio
     }
 }
 
+static void ReloadMusic() {
+    g_bgmPool.clear();
+    g_lobbyPool.clear();
+    g_titlePool.clear();
+    std::string dir = GetExeDir();
+    LoadMusicFromDir(dir + "\\music", g_bgmPool);
+    LoadMusicFromDir(dir + "\\music_lobby", g_lobbyPool);
+    LoadMusicFromDir(dir + "\\music_title", g_titlePool);
+    BuildShuffleOrder(g_bgmOrder, g_bgmPool); g_bgmOrderPos = 0;
+    BuildShuffleOrder(g_lobbyOrder, g_lobbyPool); g_lobbyOrderPos = 0;
+    BuildShuffleOrder(g_titleOrder, g_titlePool); g_titleOrderPos = 0;
+    if (g_pShared) {
+        g_pShared->hasBgmTracks = !g_bgmPool.empty();
+        g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
+        g_pShared->hasTitleTracks = !g_titlePool.empty();
+    }
+}
+
 static void LoadFavorites() {
     g_favorites.clear();
     std::ifstream f(Utf8ToWide(GetExeDir()) + L"\\favorites.txt");
@@ -1311,7 +1329,33 @@ static void RenderUI() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    ImGui::PushItemWidth(contentW - 36.0f);
     ImGui::InputTextWithHint("##search", "Search tracks...", g_searchBuf, sizeof(g_searchBuf));
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    {
+        ImVec2 rp = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##refresh", ImVec2(28, ImGui::GetFrameHeight()));
+        bool hovered = ImGui::IsItemHovered();
+        bool clicked = ImGui::IsItemClicked();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float cx = rp.x + 14, cy = rp.y + ImGui::GetFrameHeight() * 0.5f;
+        ImU32 col = ImGui::GetColorU32(hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+        float r = 7.0f;
+        dl->AddCircle(ImVec2(cx, cy), r, col, 0, 1.5f);
+        int segs = 12;
+        for (int i = 0; i < segs; i++) {
+            float a0 = (float)i / segs * 6.283185f - 1.2f;
+            float a1 = a0 + 0.35f;
+            dl->AddLine(
+                ImVec2(cx + cosf(a0) * (r - 1), cy + sinf(a0) * (r - 1)),
+                ImVec2(cx + cosf(a1) * (r - 1), cy + sinf(a1) * (r - 1)), col, 2.0f);
+        }
+        ImVec2 tip = ImVec2(cx + cosf(-1.2f) * (r + 2), cy + sinf(-1.2f) * (r + 2));
+        dl->AddTriangleFilled(tip,
+            ImVec2(tip.x - 4, tip.y + 1), ImVec2(tip.x + 1, tip.y + 5), col);
+        if (clicked) ReloadMusic();
+    }
 
     ImGui::Spacing();
 
