@@ -1224,11 +1224,8 @@ static void RenderUI() {
         ImVec2 gp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##credits", ImVec2(22, 22));
         if (ImGui::IsItemClicked()) g_showCreditsPopup = true;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = gp.x + 11, cy = gp.y + 11;
         ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        dl->AddCircleFilled(ImVec2(cx, cy), 9.0f, col);
-        dl->AddText(ImVec2(cx - 3.5f, cy - 7.0f), ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)), "i");
+        ImGui::GetWindowDrawList()->AddText(ImVec2(gp.x + 3, gp.y + 1), col, "\xE2\x84\xB9");
     }
 
     ImGui::SameLine(contentW - 30.0f);
@@ -1236,24 +1233,8 @@ static void RenderUI() {
         ImVec2 gp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##settings", ImVec2(22, 22));
         if (ImGui::IsItemClicked()) g_showSettingsPopup = !g_showSettingsPopup;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = gp.x + 11, cy = gp.y + 11;
         ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        float outerR = 8.0f, innerR = 4.5f, toothH = 2.5f, toothW = 2.0f;
-        int teeth = 8;
-        for (int i = 0; i < teeth; i++) {
-            float a0 = (float)i / teeth * 6.283185f;
-            float a1 = a0 + (1.5f / teeth) * 6.283185f * 0.5f;
-            float cos0 = cosf(a0), sin0 = sinf(a0);
-            float cos1 = cosf(a1), sin1 = sinf(a1);
-            ImVec2 p0(cx + cos0 * outerR, cy + sin0 * outerR);
-            ImVec2 p1(cx + cos1 * (outerR + toothH), cy + sin1 * (outerR + toothH));
-            ImVec2 p2(cx + cosf(a0 + 3.14159f / teeth) * (outerR + toothH), cy + sinf(a0 + 3.14159f / teeth) * (outerR + toothH));
-            ImVec2 p3(cx + cosf(a1 + 3.14159f / teeth * 2) * outerR, cy + sinf(a1 + 3.14159f / teeth * 2) * outerR);
-            dl->AddQuadFilled(p0, p1, p2, p3, col);
-        }
-        dl->AddCircleFilled(ImVec2(cx, cy), outerR, ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)));
-        dl->AddCircleFilled(ImVec2(cx, cy), innerR, col);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(gp.x + 2, gp.y + 1), col, "\xE2\x9A\x99");
     }
 
     ImGui::Spacing();
@@ -1356,25 +1337,9 @@ static void RenderUI() {
     {
         ImVec2 rp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##refresh", ImVec2(28, ImGui::GetFrameHeight()));
-        bool hovered = ImGui::IsItemHovered();
-        bool clicked = ImGui::IsItemClicked();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = rp.x + 14, cy = rp.y + ImGui::GetFrameHeight() * 0.5f;
-        ImU32 col = ImGui::GetColorU32(hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        float r = 7.0f;
-        dl->AddCircle(ImVec2(cx, cy), r, col, 0, 1.5f);
-        int segs = 12;
-        for (int i = 0; i < segs; i++) {
-            float a0 = (float)i / segs * 6.283185f - 1.2f;
-            float a1 = a0 + 0.35f;
-            dl->AddLine(
-                ImVec2(cx + cosf(a0) * (r - 1), cy + sinf(a0) * (r - 1)),
-                ImVec2(cx + cosf(a1) * (r - 1), cy + sinf(a1) * (r - 1)), col, 2.0f);
-        }
-        ImVec2 tip = ImVec2(cx + cosf(-1.2f) * (r + 2), cy + sinf(-1.2f) * (r + 2));
-        dl->AddTriangleFilled(tip,
-            ImVec2(tip.x - 4, tip.y + 1), ImVec2(tip.x + 1, tip.y + 5), col);
-        if (clicked) ReloadMusic();
+        if (ImGui::IsItemClicked()) ReloadMusic();
+        ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+        ImGui::GetWindowDrawList()->AddText(ImVec2(rp.x + 4, rp.y + 2), col, "\xE2\x86\xBB");
     }
 
     ImGui::Spacing();
