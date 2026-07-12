@@ -35,8 +35,8 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-static const char* APP_VERSION = "0.1.0";
-static const char* WINDOW_TITLE = "Sonic Custom BGM v0.1.0";
+static const char* APP_VERSION = "0.1.1";
+static const char* WINDOW_TITLE = "Sonic Custom BGM v" "0.1.1";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
