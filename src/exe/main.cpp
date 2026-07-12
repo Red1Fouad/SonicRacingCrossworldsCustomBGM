@@ -32,7 +32,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 static const char* WINDOW_TITLE = "Sonic Custom BGM";
 static const int WIN_W = 640;
-static const int WIN_H = 680;
+static const int WIN_H = 720;
 #define WM_APP_GONE (WM_APP + 2)
 
 static HINSTANCE g_hInst = nullptr;
@@ -471,11 +471,6 @@ static void HandleHotkeys() {
         if (cL && !pL && g_audioInitialized.load()) DoPrev();
         pU = cU; pD = cD; pL = cL; pR = cR;
     }
-    static bool pO = false;
-    bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    bool cO = (GetAsyncKeyState('O') & 0x8000) != 0;
-    if (ctrl && cO && !pO && !g_injected.load()) g_showProcessPopup = true;
-    pO = cO;
 }
 
 static bool CreateDeviceD3D(HWND hWnd) {
@@ -548,28 +543,85 @@ static void RenderUI() {
     ImGui::TextColored(ImVec4(0.31f, 0.71f, 1.0f, 1.0f), "%s", trackName);
     ImGui::PopFont();
 
-    ImGui::TextDisabled("Pool: %s    Volume: %d%%",
-        (inj && snap.poolName[0]) ? snap.poolName : "--",
-        (int)(g_customBgmVolume.load() * 100));
+    ImGui::TextDisabled("Pool: %s", (inj && snap.poolName[0]) ? snap.poolName : "--");
 
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
 
-    float btnW = 70.0f;
-    float btnH = 36.0f;
+    float btnW = 38.0f;
+    float btnH = 38.0f;
     float totalBtnW = btnW * 4 + ImGui::GetStyle().ItemSpacing.x * 3;
     float btnX = (displaySize.x - totalBtnW) / 2.0f;
     ImGui::SetCursorPosX(btnX);
 
-    if (ImGui::Button("|<", ImVec2(btnW, btnH))) DoPrev();
+    ImVec4 activeCol(0.31f, 0.71f, 1.0f, 1.0f);
+    ImU32 iCol = ImGui::GetColorU32(activeCol);
+
+    auto IconBtn = [](const char* id, ImVec2 size) -> bool {
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton(id, size);
+        ImU32 bg = ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive : (ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered : ImGuiCol_Button));
+        ImGui::GetWindowDrawList()->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 4.0f);
+        return ImGui::IsItemClicked();
+    };
+
+    if (IconBtn("##prev", ImVec2(btnW, btnH))) DoPrev();
+    {
+        ImVec2 p = ImGui::GetItemRectMin();
+        float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
+        float r = btnH * 0.28f;
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cx - r * 1.1f, cy - r), ImVec2(cx - r * 0.85f, cy + r), iCol);
+        ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(cx + r * 0.8f, cy - r), ImVec2(cx + r * 0.8f, cy + r), ImVec2(cx - r * 0.7f, cy), iCol);
+    }
+
     ImGui::SameLine();
-    const char* playLabel = g_paused.load() ? ">" : "||";
-    if (ImGui::Button(playLabel, ImVec2(btnW, btnH))) DoPlayPause();
+
+    {
+        const char* playId = (g_paused.load() || !g_bgmActive.load()) ? "##play" : "##pause";
+        if (IconBtn(playId, ImVec2(btnW, btnH))) DoPlayPause();
+        ImVec2 p = ImGui::GetItemRectMin();
+        float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
+        float r = btnH * 0.32f;
+        if (g_paused.load() || !g_bgmActive.load()) {
+            ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(cx - r * 0.7f, cy - r), ImVec2(cx - r * 0.7f, cy + r), ImVec2(cx + r * 0.9f, cy), iCol);
+        } else {
+            float bw = r * 0.35f;
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cx - r * 0.4f - bw, cy - r), ImVec2(cx - r * 0.4f, cy + r), iCol);
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cx + r * 0.4f - bw, cy - r), ImVec2(cx + r * 0.4f, cy + r), iCol);
+        }
+    }
+
     ImGui::SameLine();
-    if (ImGui::Button(">|", ImVec2(btnW, btnH))) DoSkip();
+
+    if (IconBtn("##stop", ImVec2(btnW, btnH))) DoStop();
+    {
+        ImVec2 p = ImGui::GetItemRectMin();
+        float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
+        float r = btnH * 0.28f;
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cx - r, cy - r), ImVec2(cx + r, cy + r), iCol);
+    }
+
     ImGui::SameLine();
-    if (ImGui::Button("[]", ImVec2(btnW, btnH))) DoStop();
+
+    if (IconBtn("##next", ImVec2(btnW, btnH))) DoSkip();
+    {
+        ImVec2 p = ImGui::GetItemRectMin();
+        float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
+        float r = btnH * 0.28f;
+        ImGui::GetWindowDrawList()->AddTriangleFilled(ImVec2(cx - r * 0.8f, cy - r), ImVec2(cx - r * 0.8f, cy + r), ImVec2(cx + r * 0.7f, cy), iCol);
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(cx + r * 0.85f, cy - r), ImVec2(cx + r * 1.1f, cy + r), iCol);
+    }
+
+    ImGui::Spacing();
+
+    float vol = g_customBgmVolume.load();
+    float volPct = vol * 100.0f;
+    if (ImGui::SliderFloat("##vol", &volPct, 0.0f, 500.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+        vol = volPct / 100.0f;
+        g_customBgmVolume.store(vol);
+        if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, vol);
+        if (g_pShared) g_pShared->volume = vol;
+        SaveSettings();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -597,7 +649,7 @@ static void RenderUI() {
         curTrack = g_currentTrackName;
     }
 
-    float trackListH = ImGui::GetContentRegionAvail().y - 80.0f;
+    float trackListH = ImGui::GetContentRegionAvail().y - 110.0f;
     if (trackListH < 100.0f) trackListH = 100.0f;
     ImGui::BeginChild("##TrackList", ImVec2(0, trackListH), true);
     std::vector<CompressedAudio>* pools[] = { &g_bgmPool, &g_lobbyPool, &g_titlePool };
@@ -638,18 +690,16 @@ static void RenderUI() {
     }
 
     ImGui::Spacing();
-
-    float vol = g_customBgmVolume.load();
-    if (ImGui::SliderFloat("Volume", &vol, 0.0f, 5.0f, "%.0f%%")) {
-        g_customBgmVolume.store(vol);
-        if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, vol);
-        if (g_pShared) g_pShared->volume = vol;
-        SaveSettings();
-    }
-
-    ImGui::Spacing();
     ImGui::Separator();
-    ImGui::TextDisabled("Ctrl+Up/Down: Vol  |  Ctrl+Right: Skip  |  Ctrl+Left: Prev  |  Ctrl+O: Inject");
+    ImGui::Spacing();
+
+    ImGui::PushFont(g_fontMono);
+    ImGui::TextDisabled("  Ctrl+Up/Down   Volume");
+    ImGui::SameLine(displaySize.x * 0.37f);
+    ImGui::TextDisabled("  Ctrl+Right     Skip");
+    ImGui::SameLine(displaySize.x * 0.67f);
+    ImGui::TextDisabled("  Ctrl+Left      Prev");
+    ImGui::PopFont();
 
     ImGui::End();
 
