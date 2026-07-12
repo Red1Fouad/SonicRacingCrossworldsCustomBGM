@@ -253,6 +253,9 @@ static void ReloadMusic() {
     g_lobbyPool.clear();
     g_titlePool.clear();
     std::string dir = GetExeDir();
+    CreateDirectoryA((dir + "\\music").c_str(), NULL);
+    CreateDirectoryA((dir + "\\music_lobby").c_str(), NULL);
+    CreateDirectoryA((dir + "\\music_title").c_str(), NULL);
     LoadMusicFromDir(dir + "\\music", g_bgmPool);
     LoadMusicFromDir(dir + "\\music_lobby", g_lobbyPool);
     LoadMusicFromDir(dir + "\\music_title", g_titlePool);
@@ -740,6 +743,9 @@ static void AudioThread() {
 
 static void InitAudio() {
     std::string dir = GetExeDir();
+    CreateDirectoryA((dir + "\\music").c_str(), NULL);
+    CreateDirectoryA((dir + "\\music_lobby").c_str(), NULL);
+    CreateDirectoryA((dir + "\\music_title").c_str(), NULL);
     LoadMusicFromDir(dir + "\\music", g_bgmPool);
     LoadMusicFromDir(dir + "\\music_lobby", g_lobbyPool);
     LoadMusicFromDir(dir + "\\music_title", g_titlePool);
