@@ -26,10 +26,14 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx9.h"
 
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+
 #pragma comment(lib, "xaudio2.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "SDL2.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -98,6 +102,21 @@ static std::string g_lastNotifiedTrack;
 struct RecentEntry { std::string filename; int poolIndex; };
 static std::vector<RecentEntry> g_recentTracks;
 static const int MAX_RECENT = 50;
+
+enum HotkeyAction { HOTKEY_SKIP = 0, HOTKEY_PREV, HOTKEY_VOLUP, HOTKEY_VOLDOWN, HOTKEY_COUNT };
+struct KeyBinding { int keys[5]; };
+struct GpBinding { int buttons[5]; };
+struct HotkeyBinding { KeyBinding kb; GpBinding gp; };
+
+static HotkeyBinding g_hotkeys[HOTKEY_COUNT];
+static int g_recordingAction = -1;
+static bool g_recordingKeyboard = false;
+static bool g_recordingController = false;
+static bool g_showHotkeyWindow = false;
+static SDL_GameController* g_gameController = nullptr;
+static bool g_prevKeyState[256] = {};
+static bool g_gpWasPressed = false;
+static int g_gpPeakButtons[5] = {-1,-1,-1,-1,-1};
 
 static std::string WideToUtf8(const wchar_t* w) {
     if (!w || !*w) return {};
@@ -272,6 +291,220 @@ static void AddRecent(const std::string& name, int pool) {
     g_recentTracks.insert(g_recentTracks.begin(), { name, pool });
     while ((int)g_recentTracks.size() > MAX_RECENT) g_recentTracks.pop_back();
     SaveRecent();
+}
+
+static const char* VkToString(int vk) {
+    switch (vk) {
+    case VK_CONTROL: return "Ctrl";
+    case VK_MENU: return "Alt";
+    case VK_SHIFT: return "Shift";
+    case VK_LEFT: return "Left";
+    case VK_RIGHT: return "Right";
+    case VK_UP: return "Up";
+    case VK_DOWN: return "Down";
+    case VK_SPACE: return "Space";
+    case VK_RETURN: return "Enter";
+    case VK_ESCAPE: return "Esc";
+    case VK_TAB: return "Tab";
+    case VK_BACK: return "Backspace";
+    case VK_DELETE: return "Del";
+    case VK_INSERT: return "Ins";
+    case VK_HOME: return "Home";
+    case VK_END: return "End";
+    case VK_PRIOR: return "PageUp";
+    case VK_NEXT: return "PageDown";
+    default: {
+        if (vk >= VK_F1 && vk <= VK_F12) { static char fb[8]; snprintf(fb, sizeof(fb), "F%d", vk - VK_F1 + 1); return fb; }
+        if (vk >= '0' && vk <= '9') { static char db[2] = {(char)vk, 0}; return db; }
+        if (vk >= 'A' && vk <= 'Z') { static char ab[2] = {(char)vk, 0}; return ab; }
+        static char buf[32];
+        UINT scan = MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+        int len = GetKeyNameTextA(scan << 16, buf, sizeof(buf));
+        return (len > 0) ? buf : "?";
+    }
+    }
+}
+
+static const char* GpButtonToString(int btn) {
+    switch (btn) {
+    case SDL_CONTROLLER_BUTTON_A: return "A";
+    case SDL_CONTROLLER_BUTTON_B: return "B";
+    case SDL_CONTROLLER_BUTTON_X: return "X";
+    case SDL_CONTROLLER_BUTTON_Y: return "Y";
+    case SDL_CONTROLLER_BUTTON_BACK: return "Back";
+    case SDL_CONTROLLER_BUTTON_GUIDE: return "Guide";
+    case SDL_CONTROLLER_BUTTON_START: return "Start";
+    case SDL_CONTROLLER_BUTTON_LEFTSTICK: return "L3";
+    case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return "R3";
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return "LB";
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return "RB";
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return "D-Up";
+    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return "D-Down";
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return "D-Left";
+    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return "D-Right";
+    default: return "?";
+    }
+}
+
+static void FormatKeyBinding(const KeyBinding& kb, char* buf, size_t bufSize) {
+    if (kb.keys[0] == -1) { strncpy_s(buf, bufSize, "[None]", _TRUNCATE); return; }
+    std::string r;
+    for (int i = 0; i < 5 && kb.keys[i] != -1; i++) {
+        if (i > 0) r += " + ";
+        r += VkToString(kb.keys[i]);
+    }
+    strncpy_s(buf, bufSize, r.c_str(), _TRUNCATE);
+}
+
+static void FormatGpBinding(const GpBinding& gp, char* buf, size_t bufSize) {
+    if (gp.buttons[0] == -1) { strncpy_s(buf, bufSize, "[None]", _TRUNCATE); return; }
+    std::string r;
+    for (int i = 0; i < 5 && gp.buttons[i] != -1; i++) {
+        if (i > 0) r += " + ";
+        r += GpButtonToString(gp.buttons[i]);
+    }
+    strncpy_s(buf, bufSize, r.c_str(), _TRUNCATE);
+}
+
+static bool IsBindingActive(const HotkeyBinding& hb) {
+    if (hb.kb.keys[0] != -1) {
+        bool ok = true;
+        for (int i = 0; i < 5 && hb.kb.keys[i] != -1; i++)
+            if (!(GetAsyncKeyState(hb.kb.keys[i]) & 0x8000)) { ok = false; break; }
+        if (ok) return true;
+    }
+    if (hb.gp.buttons[0] != -1 && g_gameController) {
+        bool ok = true;
+        for (int i = 0; i < 5 && hb.gp.buttons[i] != -1; i++)
+            if (!SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)hb.gp.buttons[i])) { ok = false; break; }
+        if (ok) return true;
+    }
+    return false;
+}
+
+static void SetDefaultHotkeys() {
+    memset(g_hotkeys, -1, sizeof(g_hotkeys));
+    g_hotkeys[HOTKEY_SKIP].kb.keys[0] = VK_CONTROL;
+    g_hotkeys[HOTKEY_SKIP].kb.keys[1] = VK_RIGHT;
+    g_hotkeys[HOTKEY_SKIP].gp.buttons[0] = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
+    g_hotkeys[HOTKEY_SKIP].gp.buttons[1] = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    g_hotkeys[HOTKEY_PREV].kb.keys[0] = VK_CONTROL;
+    g_hotkeys[HOTKEY_PREV].kb.keys[1] = VK_LEFT;
+    g_hotkeys[HOTKEY_VOLUP].kb.keys[0] = VK_CONTROL;
+    g_hotkeys[HOTKEY_VOLUP].kb.keys[1] = VK_UP;
+    g_hotkeys[HOTKEY_VOLDOWN].kb.keys[0] = VK_CONTROL;
+    g_hotkeys[HOTKEY_VOLDOWN].kb.keys[1] = VK_DOWN;
+}
+
+static void LoadHotkeys() {
+    SetDefaultHotkeys();
+    std::ifstream f(Utf8ToWide(GetExeDir()) + L"\\hotkeys.txt");
+    if (!f.is_open()) return;
+    std::string line;
+    auto parseInts = [](const std::string& s, int* out, int maxC) {
+        int c = 0;
+        std::istringstream ss(s);
+        std::string tok;
+        while (std::getline(ss, tok, ',') && c < maxC) {
+            if (tok.empty()) break;
+            out[c++] = std::atoi(tok.c_str());
+        }
+        for (int i = c; i < maxC; i++) out[i] = -1;
+    };
+    while (std::getline(f, line)) {
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string key = line.substr(0, colon);
+        std::string val = line.substr(colon + 1);
+        size_t s = val.find_first_not_of(" \t");
+        if (s != std::string::npos) val = val.substr(s);
+        int action = -1; bool isKb = false;
+        if (key == "Skip_KB") { action = HOTKEY_SKIP; isKb = true; }
+        else if (key == "Skip_GP") { action = HOTKEY_SKIP; }
+        else if (key == "Prev_KB") { action = HOTKEY_PREV; isKb = true; }
+        else if (key == "Prev_GP") { action = HOTKEY_PREV; }
+        else if (key == "VolUp_KB") { action = HOTKEY_VOLUP; isKb = true; }
+        else if (key == "VolUp_GP") { action = HOTKEY_VOLUP; }
+        else if (key == "VolDown_KB") { action = HOTKEY_VOLDOWN; isKb = true; }
+        else if (key == "VolDown_GP") { action = HOTKEY_VOLDOWN; }
+        if (action >= 0) {
+            if (isKb) parseInts(val, g_hotkeys[action].kb.keys, 5);
+            else parseInts(val, g_hotkeys[action].gp.buttons, 5);
+        }
+    }
+}
+
+static void SaveHotkeys() {
+    std::ofstream out(Utf8ToWide(GetExeDir()) + L"\\hotkeys.txt");
+    if (!out.is_open()) return;
+    const char* names[] = { "Skip", "Prev", "VolUp", "VolDown" };
+    for (int i = 0; i < HOTKEY_COUNT; i++) {
+        out << names[i] << "_KB:";
+        for (int j = 0; j < 5 && g_hotkeys[i].kb.keys[j] != -1; j++) {
+            if (j > 0) out << ",";
+            out << g_hotkeys[i].kb.keys[j];
+        }
+        out << "\n" << names[i] << "_GP:";
+        for (int j = 0; j < 5 && g_hotkeys[i].gp.buttons[j] != -1; j++) {
+            if (j > 0) out << ",";
+            out << g_hotkeys[i].gp.buttons[j];
+        }
+        out << "\n";
+    }
+}
+
+static void PollKeyboardRecording() {
+    if (!g_recordingKeyboard || g_recordingAction < 0) return;
+    for (int k = 8; k < 256; k++) {
+        if (k == VK_CONTROL || k == VK_MENU || k == VK_SHIFT) continue;
+        if (k == VK_LCONTROL || k == VK_RCONTROL) continue;
+        if (k == VK_LMENU || k == VK_RMENU) continue;
+        if (k == VK_LSHIFT || k == VK_RSHIFT) continue;
+        if (k == VK_LWIN || k == VK_RWIN) continue;
+        bool down = (GetAsyncKeyState(k) & 0x8000) != 0;
+        if (down && !g_prevKeyState[k]) {
+            if (k == VK_ESCAPE) {
+                g_recordingKeyboard = false;
+                g_recordingAction = -1;
+            } else {
+                KeyBinding& kb = g_hotkeys[g_recordingAction].kb;
+                memset(&kb, -1, sizeof(kb));
+                int idx = 0;
+                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) kb.keys[idx++] = VK_CONTROL;
+                if (GetAsyncKeyState(VK_MENU) & 0x8000) kb.keys[idx++] = VK_MENU;
+                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) kb.keys[idx++] = VK_SHIFT;
+                if (idx < 4) kb.keys[idx++] = k;
+                g_recordingKeyboard = false;
+                g_recordingAction = -1;
+                SaveHotkeys();
+            }
+            break;
+        }
+    }
+    for (int k = 0; k < 256; k++)
+        g_prevKeyState[k] = (GetAsyncKeyState(k) & 0x8000) != 0;
+}
+
+static void PollControllerRecording() {
+    if (!g_recordingController || g_recordingAction < 0 || !g_gameController) return;
+    int cur[5] = {-1,-1,-1,-1,-1};
+    int cnt = 0; bool any = false;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && cnt < 4; b++) {
+        if (SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)b)) {
+            any = true;
+            cur[cnt++] = b;
+        }
+    }
+    if (any) {
+        g_gpWasPressed = true;
+        memcpy(g_gpPeakButtons, cur, sizeof(g_gpPeakButtons));
+    } else if (g_gpWasPressed) {
+        memcpy(g_hotkeys[g_recordingAction].gp.buttons, g_gpPeakButtons, sizeof(g_gpPeakButtons));
+        g_gpWasPressed = false;
+        g_recordingController = false;
+        g_recordingAction = -1;
+        SaveHotkeys();
+    }
 }
 
 static void SaveSettings() {
@@ -459,6 +692,7 @@ static void InitAudio() {
     LoadMusicFromDir(dir + "\\music_title", g_titlePool);
     LoadFavorites();
     LoadRecent();
+    LoadHotkeys();
 
     std::ifstream settingsFile(dir + "\\settings.txt");
     if (settingsFile.is_open()) {
@@ -658,32 +892,32 @@ static void AutoInjectThread() {
 }
 
 static void HandleHotkeys() {
-    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
-        static bool pU = false, pD = false, pL = false, pR = false;
-        bool cU = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
-        bool cD = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
-        bool cL = (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
-        bool cR = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+    if (g_recordingKeyboard || g_recordingController) return;
 
-        static auto lastVolChange = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastVolChange).count();
+    static bool pU = false, pD = false, pL = false, pR = false;
+    bool cU = IsBindingActive(g_hotkeys[HOTKEY_VOLUP]);
+    bool cD = IsBindingActive(g_hotkeys[HOTKEY_VOLDOWN]);
+    bool cL = IsBindingActive(g_hotkeys[HOTKEY_PREV]);
+    bool cR = IsBindingActive(g_hotkeys[HOTKEY_SKIP]);
 
-        if (elapsed >= 100) {
-            if (cU && !pU) g_customBgmVolume.store(std::min(5.0f, g_customBgmVolume.load() + 0.1f));
-            if (cD && !pD) g_customBgmVolume.store(std::max(0.0f, g_customBgmVolume.load() - 0.1f));
-            if ((cU && !pU) || (cD && !pD)) {
-                float v = g_customBgmVolume.load();
-                if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, v);
-                if (g_pShared) g_pShared->volume = v;
-                SaveSettings();
-                lastVolChange = now;
-            }
+    static auto lastVolChange = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastVolChange).count();
+
+    if (elapsed >= 100) {
+        if (cU && !pU) g_customBgmVolume.store(std::min(5.0f, g_customBgmVolume.load() + 0.1f));
+        if (cD && !pD) g_customBgmVolume.store(std::max(0.0f, g_customBgmVolume.load() - 0.1f));
+        if ((cU && !pU) || (cD && !pD)) {
+            float v = g_customBgmVolume.load();
+            if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, v);
+            if (g_pShared) g_pShared->volume = v;
+            SaveSettings();
+            lastVolChange = now;
         }
-        if (cR && !pR && g_audioInitialized.load()) DoSkip();
-        if (cL && !pL && g_audioInitialized.load()) DoPrev();
-        pU = cU; pD = cD; pL = cL; pR = cR;
     }
+    if (cR && !pR && g_audioInitialized.load()) DoSkip();
+    if (cL && !pL && g_audioInitialized.load()) DoPrev();
+    pU = cU; pD = cD; pL = cL; pR = cR;
 }
 
 static bool CreateDeviceD3D(HWND hWnd) {
@@ -830,6 +1064,68 @@ static bool PassesFilter(const std::string& name) {
         if (lower.find(filter) == std::string::npos) return false;
     }
     return true;
+}
+
+static void RenderHotkeyWindow() {
+    if (!g_showHotkeyWindow) return;
+    ImGui::SetNextWindowSize(ImVec2(520, 280), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Configure Hotkeys", &g_showHotkeyWindow)) { ImGui::End(); return; }
+
+    if (g_recordingKeyboard || g_recordingController) {
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f),
+            g_recordingKeyboard ? "Press a key combination..." : "Press controller buttons...");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) { g_recordingKeyboard = g_recordingController = false; g_recordingAction = -1; }
+        ImGui::Spacing();
+    }
+
+    struct ActDef { const char* label; int action; };
+    ActDef acts[] = { {"Skip Track", HOTKEY_SKIP}, {"Previous Track", HOTKEY_PREV}, {"Volume Up", HOTKEY_VOLUP}, {"Volume Down", HOTKEY_VOLDOWN} };
+
+    if (ImGui::BeginTable("##hk", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Action", 0, 0.35f);
+        ImGui::TableSetupColumn("Keyboard", 0, 0.325f);
+        ImGui::TableSetupColumn("Controller", 0, 0.325f);
+        ImGui::TableHeadersRow();
+        for (auto& a : acts) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(a.label);
+
+            ImGui::TableSetColumnIndex(1);
+            char kbBuf[64];
+            FormatKeyBinding(g_hotkeys[a.action].kb, kbBuf, sizeof(kbBuf));
+            if (g_recordingKeyboard && g_recordingAction == a.action) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.6f, 0.0f, 1.0f));
+                if (ImGui::SmallButton("Listening...")) { g_recordingKeyboard = false; g_recordingAction = -1; }
+                ImGui::PopStyleColor();
+            } else {
+                if (ImGui::SmallButton(kbBuf)) { g_recordingKeyboard = true; g_recordingController = false; g_recordingAction = a.action; }
+            }
+
+            ImGui::TableSetColumnIndex(2);
+            char gpBuf[64];
+            FormatGpBinding(g_hotkeys[a.action].gp, gpBuf, sizeof(gpBuf));
+            if (g_recordingController && g_recordingAction == a.action) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.6f, 0.0f, 1.0f));
+                if (ImGui::SmallButton("Listening...")) { g_recordingController = false; g_recordingAction = -1; }
+                ImGui::PopStyleColor();
+            } else {
+                if (ImGui::SmallButton(gpBuf)) { g_recordingController = true; g_recordingKeyboard = false; g_recordingAction = a.action; }
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (ImGui::Button("Reset to Defaults")) { SetDefaultHotkeys(); SaveHotkeys(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) g_showHotkeyWindow = false;
+
+    ImGui::End();
 }
 
 static void RenderUI() {
@@ -1104,11 +1400,23 @@ static void RenderUI() {
     ImGui::Spacing();
 
     ImGui::PushFont(g_fontMono);
-    ImGui::TextDisabled("  Ctrl+Up/Down   Volume");
+    {
+        char buf[64];
+        FormatKeyBinding(g_hotkeys[HOTKEY_VOLUP].kb, buf, sizeof(buf));
+        ImGui::TextDisabled("  %s Volume", buf);
+    }
     ImGui::SameLine(displaySize.x * 0.37f);
-    ImGui::TextDisabled("  Ctrl+Right     Skip");
+    {
+        char buf[64];
+        FormatKeyBinding(g_hotkeys[HOTKEY_SKIP].kb, buf, sizeof(buf));
+        ImGui::TextDisabled("  %s     Skip", buf);
+    }
     ImGui::SameLine(displaySize.x * 0.67f);
-    ImGui::TextDisabled("  Ctrl+Left      Prev");
+    {
+        char buf[64];
+        FormatKeyBinding(g_hotkeys[HOTKEY_PREV].kb, buf, sizeof(buf));
+        ImGui::TextDisabled("  %s      Prev", buf);
+    }
     ImGui::PopFont();
 
     ImGui::End();
@@ -1157,6 +1465,15 @@ static void RenderUI() {
         ImGui::Separator();
         ImGui::Spacing();
 
+        ImGui::Text("Controls");
+        ImGui::Indent();
+        if (ImGui::Button("Configure Hotkeys...")) g_showHotkeyWindow = true;
+        ImGui::Unindent();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
         ImGui::Text("Favorites: %d tracks", (int)g_favorites.size());
         ImGui::TextDisabled("Click the circle next to a track to toggle favorite");
 
@@ -1199,6 +1516,8 @@ static void RenderUI() {
         }
         ImGui::EndPopup();
     }
+
+    RenderHotkeyWindow();
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1257,6 +1576,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
+        if (g_gameController) { SDL_GameControllerClose(g_gameController); g_gameController = nullptr; }
+        SDL_Quit();
         PostQuitMessage(0);
         return 0;
     case WM_APP_GONE:
@@ -1300,6 +1621,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     ShowWindow(g_hWnd, SW_SHOW);
     UpdateWindow(g_hWnd);
+
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_GAMECONTROLLER) == 0) {
+        for (int i = 0; i < SDL_NumJoysticks(); i++) {
+            if (SDL_IsGameController(i)) {
+                g_gameController = SDL_GameControllerOpen(i);
+                if (g_gameController) break;
+            }
+        }
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -1350,6 +1681,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             DispatchMessageA(&msg);
         }
         if (!running) break;
+
+        {
+            SDL_Event sdle;
+            while (SDL_PollEvent(&sdle)) {
+                if (sdle.type == SDL_CONTROLLERDEVICEADDED) {
+                    if (!g_gameController) g_gameController = SDL_GameControllerOpen(sdle.cdevice.which);
+                } else if (sdle.type == SDL_CONTROLLERDEVICEREMOVED) {
+                    if (g_gameController && sdle.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_gameController))) {
+                        SDL_GameControllerClose(g_gameController);
+                        g_gameController = nullptr;
+                    }
+                }
+            }
+        }
+
+        PollKeyboardRecording();
+        PollControllerRecording();
 
         if (g_gameGone) {
             DoDisconnect();

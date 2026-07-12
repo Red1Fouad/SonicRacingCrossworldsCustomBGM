@@ -21,7 +21,7 @@ $imguiFiles = @(
     'lib\imgui\backends\imgui_impl_win32.cpp',
     'lib\imgui\backends\imgui_impl_dx9.cpp'
 )
-& "$HOSTX64\cl.exe" /EHsc /std:c++17 /MD /O2 /DUSE_DEFAULT_STDLIB /I include /I libhelix-aac /I lib\imgui /I lib\imgui\backends /I src\common /I shared 'src\exe\main.cpp' $imguiFiles $aacFiles /link /OUT:SonicCustomBGM.exe user32.lib psapi.lib advapi32.lib gdi32.lib comdlg32.lib comctl32.lib xaudio2.lib ole32.lib d3d9.lib
+& "$HOSTX64\cl.exe" /EHsc /std:c++17 /MD /O2 /DUSE_DEFAULT_STDLIB /I include /I libhelix-aac /I lib\imgui /I lib\imgui\backends /I lib\SDL2 /I src\common /I shared 'src\exe\main.cpp' $imguiFiles $aacFiles /link /OUT:SonicCustomBGM.exe user32.lib psapi.lib advapi32.lib gdi32.lib comdlg32.lib comctl32.lib xaudio2.lib ole32.lib d3d9.lib 'lib\SDL2\lib\x64\SDL2.lib'
 if ($LASTEXITCODE -ne 0) { Write-Host 'EXE build FAILED' -ForegroundColor Red; exit 1 }
 
 Write-Host '=== Build complete ===' -ForegroundColor Green
