@@ -7,7 +7,6 @@
 #include <map>
 #include <mutex>
 #include <sstream>
-#include <iostream>
 #include <functional>
 #include "MinHook.h"
 
@@ -29,9 +28,6 @@ static criAtomExCategory_SetVolume_t fpCategorySetVolume = nullptr;
 static criAtomExCategory_GetVolume_t fpCategoryGetVolume = nullptr;
 
 static std::map<void*, std::string> g_playerCueNames;
-static std::map<void*, int> g_playerCategoryIds;
-static std::map<void*, std::string> g_acbFiles;
-static std::map<void*, std::string> g_playerAcbFiles;
 static std::mutex g_playerMutex;
 
 static bool SafeReadString(const char* src, char* dest, size_t maxLen) {
@@ -89,12 +85,8 @@ static void Hook_SetCueName(void* player, void* acb, const char* cueName) {
     char safeName[256];
     if (SafeReadString(cueName, safeName, sizeof(safeName))) {
         std::lock_guard<std::mutex> lock(g_playerMutex);
-        if (g_playerCueNames.size() > 500) { g_playerCueNames.clear(); g_playerAcbFiles.clear(); }
+        if (g_playerCueNames.size() > 500) g_playerCueNames.clear();
         g_playerCueNames[player] = safeName;
-        if (g_acbFiles.count(acb))
-            g_playerAcbFiles[player] = g_acbFiles[acb];
-        else
-            g_playerAcbFiles[player] = "Unknown";
         if (strncmp(safeName, "BGM_", 4) == 0 || strncmp(safeName, "SE_FINISH", 9) == 0) {
             bool blocked = (strcmp(safeName, "BGM_MONSTERTRUCK_01") == 0 || strcmp(safeName, "BGM_TOP_MENU") == 0 ||
                 strncmp(safeName, "BGM_CHARASELECT_", 16) == 0 || strncmp(safeName, "BGM_GARAGE_", 11) == 0 ||
@@ -107,13 +99,11 @@ static void Hook_SetCueName(void* player, void* acb, const char* cueName) {
 }
 
 static void Hook_SetCategoryById(void* player, int id) {
-    { std::lock_guard<std::mutex> lock(g_playerMutex); g_playerCategoryIds[player] = id; }
     if (fpSetCategoryById) fpSetCategoryById(player, id);
 }
 
 static void* Hook_LoadAcbFile(void* acbLib, const char* path, void* work, int workSize, void* buff, int buffSize) {
     void* ret = fpLoadAcbFile(acbLib, path, work, workSize, buff, buffSize);
-    if (ret && path) { std::lock_guard<std::mutex> lock(g_playerMutex); g_acbFiles[ret] = path; }
     return ret;
 }
 
@@ -203,7 +193,4 @@ static void CleanupCRIHooks() {
     MH_Uninitialize();
     std::lock_guard<std::mutex> lock(g_playerMutex);
     g_playerCueNames.clear();
-    g_playerCategoryIds.clear();
-    g_acbFiles.clear();
-    g_playerAcbFiles.clear();
 }

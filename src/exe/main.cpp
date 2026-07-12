@@ -29,8 +29,6 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
-#pragma comment(lib, "xaudio2.lib")
-#pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "SDL2.lib")
@@ -48,7 +46,6 @@ static const int WIN_H = 740;
 #define TRAY_SKIP 1003
 #define TRAY_EXIT 1004
 
-static HINSTANCE g_hInst = nullptr;
 static HWND g_hWnd = nullptr;
 
 static IDirect3D9* g_pD3D = nullptr;
@@ -740,8 +737,6 @@ static void AudioThread() {
         Sleep(10);
     }
 }
-
-static void ApplyTheme(int idx);
 
 static void InitAudio() {
     std::string dir = GetExeDir();
@@ -1737,7 +1732,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     SetProcessDPIAware();
-    g_hInst = hInstance;
 
     HANDLE hMutex = CreateMutexA(NULL, FALSE, "SonicCustomBGM_SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {

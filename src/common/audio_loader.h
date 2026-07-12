@@ -1,11 +1,8 @@
 #pragma once
 #include <windows.h>
-#include <fstream>
 #include <vector>
-#include <iostream>
 #include <cstring>
 #include <algorithm>
-#include <cstdlib>
 #include <string>
 
 #if __has_include("dr_mp3.h")
@@ -763,24 +760,17 @@ private:
     }
 #endif
 
-    static uint32_t UtfReadBE32(const uint8_t* p) {
-        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-    }
-    static uint16_t UtfReadBE16(const uint8_t* p) {
-        return ((uint16_t)p[0] << 8) | p[1];
-    }
-
     static bool DecodeAaxMemory(const std::vector<uint8_t>& fileData, WavData& outData) {
         if (fileData.size() < 0x20) return false;
         if (memcmp(fileData.data(), "@UTF", 4) != 0) return false;
-        uint32_t tableSize = UtfReadBE32(fileData.data() + 4) + 8;
+        uint32_t tableSize = AacReadBE32(fileData.data() + 4) + 8;
         if (tableSize > fileData.size()) return false;
-        uint16_t rowsOff = UtfReadBE16(fileData.data() + 0x0A);
-        uint32_t stringsOff = UtfReadBE32(fileData.data() + 0x0C);
-        uint32_t dataOff = UtfReadBE32(fileData.data() + 0x10);
-        uint16_t numCols = UtfReadBE16(fileData.data() + 0x18);
-        uint16_t rowWidth = UtfReadBE16(fileData.data() + 0x1A);
-        uint32_t numRows = UtfReadBE32(fileData.data() + 0x1C);
+        uint16_t rowsOff = AacReadBE16(fileData.data() + 0x0A);
+        uint32_t stringsOff = AacReadBE32(fileData.data() + 0x0C);
+        uint32_t dataOff = AacReadBE32(fileData.data() + 0x10);
+        uint16_t numCols = AacReadBE16(fileData.data() + 0x18);
+        uint16_t rowWidth = AacReadBE16(fileData.data() + 0x1A);
+        uint32_t numRows = AacReadBE32(fileData.data() + 0x1C);
         size_t absRows = rowsOff + 8;
         size_t absStrings = stringsOff + 8;
         size_t absData = dataOff + 8;
@@ -793,7 +783,7 @@ private:
             uint8_t info = fileData[schemaPos];
             cols[c].hasName = (info & 0x10) != 0;
             cols[c].type = info & 0x0F;
-            cols[c].strOff = UtfReadBE32(fileData.data() + schemaPos + 1);
+            cols[c].strOff = AacReadBE32(fileData.data() + schemaPos + 1);
             schemaPos += 5;
         }
         int dataColIdx = -1;
@@ -822,8 +812,8 @@ private:
             }
             size_t vldPos = rowBase + colOffset;
             if (vldPos + 8 > fileData.size()) continue;
-            uint32_t segOffset = UtfReadBE32(fileData.data() + vldPos);
-            uint32_t segSize = UtfReadBE32(fileData.data() + vldPos + 4);
+            uint32_t segOffset = AacReadBE32(fileData.data() + vldPos);
+            uint32_t segSize = AacReadBE32(fileData.data() + vldPos + 4);
             if (absData + segOffset + segSize > fileData.size()) continue;
             const uint8_t* segPtr = fileData.data() + absData + segOffset;
             std::vector<uint8_t> adxData(segPtr, segPtr + segSize);

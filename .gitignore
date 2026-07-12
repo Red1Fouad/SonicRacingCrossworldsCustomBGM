@@ -11,7 +11,11 @@
 *.ini
 *.txt
 *.res
-imgui.ini
+.vs/
+.vscode/
+x64/
+Debug/
+Release/
 settings.txt
 music/
 music_lobby/
