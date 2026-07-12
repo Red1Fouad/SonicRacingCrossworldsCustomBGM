@@ -1,0 +1,879 @@
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <xaudio2.h>
+#include <d3d9.h>
+#include <string>
+#include <vector>
+#include <map>
+#include <mutex>
+#include <random>
+#include <fstream>
+#include <sstream>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <algorithm>
+#define DR_MP3_IMPLEMENTATION
+#define DR_FLAC_IMPLEMENTATION
+#include "audio_engine.h"
+#include "injector.h"
+#include "../shared/status.h"
+
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx9.h"
+
+#pragma comment(lib, "xaudio2.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "d3d9.lib")
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+static const char* WINDOW_TITLE = "Sonic Custom BGM";
+static const int WIN_W = 640;
+static const int WIN_H = 680;
+#define WM_APP_GONE (WM_APP + 2)
+
+static HINSTANCE g_hInst = nullptr;
+static HWND g_hWnd = nullptr;
+
+static IDirect3D9* g_pD3D = nullptr;
+static IDirect3DDevice9* g_pd3dDevice = nullptr;
+static D3DPRESENT_PARAMETERS g_d3dpp = {};
+
+static ImFont* g_fontRegular = nullptr;
+static ImFont* g_fontBold = nullptr;
+static ImFont* g_fontMono = nullptr;
+
+static AudioEngine g_audio;
+static std::vector<CompressedAudio> g_bgmPool, g_lobbyPool, g_titlePool;
+static std::vector<int> g_bgmOrder, g_lobbyOrder, g_titleOrder;
+static int g_bgmOrderPos = 0, g_lobbyOrderPos = 0, g_titleOrderPos = 0;
+static int g_activePool = 0;
+static std::atomic<bool> g_bgmActive{ false };
+static std::atomic<bool> g_playedFinish{ false };
+static bool g_playNewMusic = false;
+static bool g_muteOnUnfocus = false;
+static std::atomic<float> g_customBgmVolume{ 1.0f };
+static std::atomic<bool> g_paused{ false };
+static std::mt19937 g_rng((unsigned)std::random_device{}());
+static std::atomic<bool> g_audioInitialized{ false };
+static std::atomic<bool> g_injected{ false };
+static std::atomic<bool> g_connecting{ false };
+static std::atomic<bool> g_scanRunning{ true };
+static std::atomic<bool> g_audioThreadRunning{ true };
+static DWORD g_targetPid = 0;
+static HANDLE g_hSharedMap = nullptr;
+static SharedMemory* g_pShared = nullptr;
+static std::mutex g_trackNameMutex;
+static std::string g_currentTrackName;
+
+static bool g_showProcessPopup = false;
+static std::vector<ProcessInfo> g_processList;
+static bool g_gameGone = false;
+
+static std::string WideToUtf8(const wchar_t* w) {
+    if (!w || !*w) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return {};
+    std::string s(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], len, nullptr, nullptr);
+    s.resize(len - 1);
+    return s;
+}
+
+static std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (len <= 0) return {};
+    std::wstring wide(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], len);
+    wide.resize(len - 1);
+    return wide;
+}
+
+static std::string GetExeDir() {
+    wchar_t wPath[MAX_PATH];
+    GetModuleFileNameW(NULL, wPath, MAX_PATH);
+    std::string s = WideToUtf8(wPath);
+    return s.substr(0, s.find_last_of("\\/"));
+}
+
+static std::string ExtractFilename(const std::string& path) {
+    size_t pos = path.find_last_of("\\/");
+    return (pos != std::string::npos) ? path.substr(pos + 1) : path;
+}
+
+struct TrackMeta { float weight = 1.0f; float volumeMul = 1.0f; };
+
+static std::map<std::string, TrackMeta> ParseTrackMeta(const std::string& dir) {
+    std::map<std::string, TrackMeta> meta;
+    std::ifstream f(Utf8ToWide(dir) + L"\\tracks.txt");
+    if (!f.is_open()) return meta;
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t s = line.find_first_not_of(" \t\r");
+        if (s == std::string::npos) continue;
+        line = line.substr(s);
+        if (line.empty() || line[0] == ';' || line[0] == '/') continue;
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string name = line.substr(0, colon);
+        size_t ne = name.find_last_not_of(" \t");
+        if (ne != std::string::npos) name = name.substr(0, ne + 1);
+        std::string rest = line.substr(colon + 1);
+        for (auto& c : rest) if (c == ',') c = ' ';
+        std::stringstream ss(rest);
+        TrackMeta tm; float v; int idx = 0;
+        while (ss >> v) { if (idx == 0) tm.weight = std::max(0.0f, v); else if (idx == 1) tm.volumeMul = std::max(0.0f, v); idx++; }
+        meta[name] = tm;
+    }
+    return meta;
+}
+
+static void BuildShuffleOrder(std::vector<int>& order, const std::vector<CompressedAudio>& pool) {
+    order.clear();
+    if (pool.empty()) return;
+    std::vector<int> rem;
+    for (int i = 0; i < (int)pool.size(); i++) rem.push_back(i);
+    while (!rem.empty()) {
+        float total = 0;
+        for (int i : rem) total += std::max(0.0f, pool[i].weight);
+        int sel = -1;
+        if (total > 0) {
+            std::uniform_real_distribution<float> d(0.0f, total);
+            float r = d(g_rng), acc = 0;
+            for (int i = 0; i < (int)rem.size(); i++) {
+                acc += std::max(0.0f, pool[rem[i]].weight);
+                if (r < acc) { sel = rem[i]; break; }
+            }
+        } else {
+            sel = rem[std::uniform_int_distribution<int>(0, (int)rem.size() - 1)(g_rng)];
+        }
+        if (sel >= 0) {
+            order.push_back(sel);
+            rem.erase(std::remove(rem.begin(), rem.end(), sel), rem.end());
+        }
+    }
+}
+
+static int GetNextIndex(std::vector<CompressedAudio>& pool, std::vector<int>& order, int& pos) {
+    if (pool.empty()) return -1;
+    if (pos >= (int)order.size()) { BuildShuffleOrder(order, pool); pos = 0; }
+    if (order.empty()) return -1;
+    return order[pos++];
+}
+
+static void LoadMusicFromDir(const std::string& dir, std::vector<CompressedAudio>& pool) {
+    auto meta = ParseTrackMeta(dir);
+    std::wstring wdir = Utf8ToWide(dir);
+    for (const wchar_t* ext : { L"\\*.wav", L"\\*.mp3", L"\\*.ogg", L"\\*.adx", L"\\*.brstm", L"\\*.flac", L"\\*.aac", L"\\*.m4a", L"\\*.aax" }) {
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW((wdir + ext).c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                std::string name = WideToUtf8(fd.cFileName);
+                CompressedAudio ca;
+                if (AudioLoader::LoadCompressed(dir + "\\" + name, ca)) {
+                    auto it = meta.find(name);
+                    if (it != meta.end()) { ca.weight = it->second.weight; ca.volumeMul = it->second.volumeMul; }
+                    pool.push_back(std::move(ca));
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+    }
+}
+
+static void SaveSettings() {
+    std::ofstream out(GetExeDir() + "\\settings.txt");
+    if (out.is_open()) {
+        out << "PlayNewMusic: " << (g_playNewMusic ? "true" : "false") << "\n";
+        out << "MuteOnUnfocus: " << (g_muteOnUnfocus ? "true" : "false") << "\n";
+        out << "Volume: " << g_customBgmVolume.load() << "\n";
+    }
+}
+
+static void UpdateSharedStatus(const char* track, const char* poolName, float vol, bool playing) {
+    if (!g_pShared) return;
+    strncpy_s(g_pShared->currentTrack, track, sizeof(g_pShared->currentTrack) - 1);
+    strncpy_s(g_pShared->poolName, poolName, sizeof(g_pShared->poolName) - 1);
+    g_pShared->volume = vol;
+    g_pShared->isPlaying = playing;
+    {
+        std::lock_guard<std::mutex> lock(g_trackNameMutex);
+        g_currentTrackName = track;
+    }
+}
+
+static void GetPool(int pid, std::vector<CompressedAudio>*& pool, std::vector<int>*& order, int*& pos, const char*& name) {
+    if (pid == 1) { pool = &g_lobbyPool; order = &g_lobbyOrder; pos = &g_lobbyOrderPos; name = "Lobby"; }
+    else if (pid == 2) { pool = &g_titlePool; order = &g_titleOrder; pos = &g_titleOrderPos; name = "Title"; }
+    else { pool = &g_bgmPool; order = &g_bgmOrder; pos = &g_bgmOrderPos; name = "BGM"; }
+}
+
+static void PlayTrack(CompressedAudio& audio, float volume, int categoryId, bool allowLoop) {
+    WavData data;
+    if (!AudioLoader::DecodeToPcm(audio, data)) return;
+    AudioLoader::NormalizePcm16(data);
+    AudioLoader::ScalePcm16(data, audio.volumeMul);
+    g_audio.PlayPreloaded(data, volume, categoryId, allowLoop);
+}
+
+static void DoPlayPause() {
+    if (!g_audioInitialized.load()) return;
+    if (g_bgmActive.load() && !g_paused.load()) {
+        g_audio.PauseCategory(0);
+        g_paused.store(true);
+    } else if (g_paused.load()) {
+        g_audio.ResumeCategory(0);
+        g_paused.store(false);
+    } else {
+        std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* pn;
+        GetPool(g_activePool, pool, order, pos, pn);
+        if (!pool->empty()) {
+            int idx = GetNextIndex(*pool, *order, *pos);
+            PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
+            g_bgmActive.store(true);
+            g_playedFinish.store(false);
+            g_paused.store(false);
+            UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
+        }
+    }
+}
+
+static void DoStop() {
+    if (!g_audioInitialized.load()) return;
+    g_audio.StopCategoryImmediate(0);
+    g_bgmActive.store(false);
+    g_paused.store(false);
+    UpdateSharedStatus("(none)", "BGM", g_customBgmVolume.load(), false);
+}
+
+static void DoSkip() {
+    if (!g_audioInitialized.load()) return;
+    std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* pn;
+    GetPool(g_activePool, pool, order, pos, pn);
+    if (!pool->empty()) {
+        int idx = GetNextIndex(*pool, *order, *pos);
+        g_audio.StopCategoryImmediate(0);
+        PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
+        g_bgmActive.store(true);
+        g_paused.store(false);
+        g_playedFinish.store(false);
+        UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
+    }
+}
+
+static void DoPrev() {
+    if (!g_audioInitialized.load()) return;
+    std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* pn;
+    GetPool(g_activePool, pool, order, pos, pn);
+    if (!pool->empty() && *pos > 1) {
+        *pos -= 2;
+        int idx = GetNextIndex(*pool, *order, *pos);
+        g_audio.StopCategoryImmediate(0);
+        PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
+        g_bgmActive.store(true);
+        g_paused.store(false);
+        g_playedFinish.store(false);
+        UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
+    } else {
+        DoStop();
+    }
+}
+
+static void OnTrackFinished() {
+    if (g_playedFinish.load()) return;
+    g_bgmActive.store(false);
+    if (!g_playNewMusic) {
+        UpdateSharedStatus("(none)", "BGM", g_customBgmVolume.load(), false);
+        return;
+    }
+    std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* poolName;
+    GetPool(g_activePool, pool, order, pos, poolName);
+    if (pool->empty()) return;
+    int idx = GetNextIndex(*pool, *order, *pos);
+    PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, false);
+    g_bgmActive.store(true);
+    UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), poolName, g_customBgmVolume.load(), true);
+}
+
+static void AudioThread() {
+    while (g_audioThreadRunning) {
+        if (g_pShared && g_audioInitialized.load()) {
+            g_pShared->hasBgmTracks = !g_bgmPool.empty();
+            g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
+            g_pShared->hasTitleTracks = !g_titlePool.empty();
+        }
+        if (g_injected.load() && g_pShared && g_audioInitialized.load()) {
+            if (InterlockedCompareExchange(&g_pShared->cmdReady, 0, 1) == 1) {
+                int cmd = g_pShared->command;
+                int poolId = g_pShared->poolId;
+                bool allowLoop = g_pShared->allowLoop;
+                float vol = g_customBgmVolume.load();
+
+                if (cmd == 1) {
+                    std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* poolName;
+                    GetPool(poolId, pool, order, pos, poolName);
+                    if (!pool->empty()) {
+                        if (!(poolId == g_activePool && g_bgmActive.load())) {
+                            g_audio.StopCategory(0);
+                            g_activePool = poolId;
+                            g_playedFinish.store(false);
+                            int idx = GetNextIndex(*pool, *order, *pos);
+                            PlayTrack((*pool)[idx], vol, 0, allowLoop);
+                            g_bgmActive.store(true);
+                            g_paused.store(false);
+                            UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), poolName, vol, true);
+                        }
+                    }
+                } else if (cmd == 3) {
+                    g_audio.StopCategory(0);
+                    g_bgmActive.store(false);
+                    g_playedFinish.store(true);
+                    g_paused.store(false);
+                    UpdateSharedStatus("(none)", "BGM", vol, false);
+                } else if (cmd == 2) {
+                    g_audio.StopCategory(0);
+                    g_bgmActive.store(false);
+                    g_paused.store(false);
+                    UpdateSharedStatus("(none)", "BGM", vol, false);
+                }
+            }
+            g_audio.Update();
+        }
+        Sleep(10);
+    }
+}
+
+static void InitAudio() {
+    std::string dir = GetExeDir();
+    LoadMusicFromDir(dir + "\\music", g_bgmPool);
+    LoadMusicFromDir(dir + "\\music_lobby", g_lobbyPool);
+    LoadMusicFromDir(dir + "\\music_title", g_titlePool);
+
+    std::ifstream settingsFile(dir + "\\settings.txt");
+    if (settingsFile.is_open()) {
+        std::string line;
+        while (std::getline(settingsFile, line)) {
+            if (line.find("PlayNewMusic:") != std::string::npos) g_playNewMusic = (line.find("true") != std::string::npos);
+            if (line.find("MuteOnUnfocus:") != std::string::npos) g_muteOnUnfocus = (line.find("true") != std::string::npos);
+            if (line.find("Volume:") != std::string::npos) {
+                size_t c = line.find(':');
+                if (c != std::string::npos) {
+                    float v = std::strtof(line.substr(c + 1).c_str(), nullptr);
+                    if (v >= 0.0f && v <= 5.0f) g_customBgmVolume.store(v);
+                }
+            }
+        }
+    }
+
+    if (g_audio.Init()) {
+        g_audio.OnTrackFinished = OnTrackFinished;
+        g_audioInitialized.store(true);
+    }
+}
+
+static void OpenSharedMemory() {
+    if (g_hSharedMap) return;
+    g_hSharedMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, SHARED_MEMORY_NAME);
+    if (g_hSharedMap) g_pShared = (SharedMemory*)MapViewOfFile(g_hSharedMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMemory));
+}
+
+static void CloseSharedMemory() {
+    if (g_pShared) { UnmapViewOfFile(g_pShared); g_pShared = nullptr; }
+    if (g_hSharedMap) { CloseHandle(g_hSharedMap); g_hSharedMap = nullptr; }
+}
+
+static void DoInject(DWORD pid) {
+    std::string dllPath = GetExeDir() + "\\SonicCustomBGM.dll";
+    if (GetFileAttributesA(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    if (InjectDll(pid, dllPath.c_str())) {
+        g_injected.store(true);
+        g_targetPid = pid;
+        Sleep(500);
+        OpenSharedMemory();
+        if (g_pShared) {
+            g_pShared->hasBgmTracks = !g_bgmPool.empty();
+            g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
+            g_pShared->hasTitleTracks = !g_titlePool.empty();
+        }
+    }
+    g_connecting = false;
+}
+
+static void DoDisconnect() {
+    CloseSharedMemory();
+    g_injected.store(false);
+    g_targetPid = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_trackNameMutex);
+        g_currentTrackName.clear();
+    }
+    g_bgmActive.store(false);
+    SetWindowTextA(g_hWnd, WINDOW_TITLE);
+}
+
+static void AutoInjectThread() {
+    while (g_scanRunning) {
+        if (!g_injected.load() && !g_connecting.load() && g_audioInitialized.load()) {
+            auto procs = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
+            if (!procs.empty()) {
+                g_connecting = true;
+                DoInject(procs[0].pid);
+            }
+        } else if (g_injected.load() && g_targetPid > 0 && !g_connecting.load()) {
+            bool gone = false;
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, g_targetPid);
+            if (hProc) {
+                DWORD exitCode;
+                GetExitCodeProcess(hProc, &exitCode);
+                CloseHandle(hProc);
+                gone = (exitCode != STILL_ACTIVE);
+            } else {
+                gone = (GetLastError() == ERROR_INVALID_PARAMETER);
+            }
+            if (gone) {
+                g_gameGone = true;
+            }
+        }
+        Sleep(2000);
+    }
+}
+
+static void HandleHotkeys() {
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
+        static bool pU = false, pD = false, pL = false, pR = false;
+        bool cU = (GetAsyncKeyState(VK_UP) & 0x8000) != 0;
+        bool cD = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+        bool cL = (GetAsyncKeyState(VK_LEFT) & 0x8000) != 0;
+        bool cR = (GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0;
+
+        static auto lastVolChange = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastVolChange).count();
+
+        if (elapsed >= 100) {
+            if (cU && !pU) g_customBgmVolume.store(std::min(5.0f, g_customBgmVolume.load() + 0.1f));
+            if (cD && !pD) g_customBgmVolume.store(std::max(0.0f, g_customBgmVolume.load() - 0.1f));
+            if ((cU && !pU) || (cD && !pD)) {
+                float v = g_customBgmVolume.load();
+                if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, v);
+                if (g_pShared) g_pShared->volume = v;
+                SaveSettings();
+                lastVolChange = now;
+            }
+        }
+        if (cR && !pR && g_audioInitialized.load()) DoSkip();
+        if (cL && !pL && g_audioInitialized.load()) DoPrev();
+        pU = cU; pD = cD; pL = cL; pR = cR;
+    }
+    static bool pO = false;
+    bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    bool cO = (GetAsyncKeyState('O') & 0x8000) != 0;
+    if (ctrl && cO && !pO && !g_injected.load()) g_showProcessPopup = true;
+    pO = cO;
+}
+
+static bool CreateDeviceD3D(HWND hWnd) {
+    g_pD3D = Direct3DCreate9(D3D_SDK_VERSION);
+    if (!g_pD3D) return false;
+
+    ZeroMemory(&g_d3dpp, sizeof(g_d3dpp));
+    g_d3dpp.Windowed = TRUE;
+    g_d3dpp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    g_d3dpp.BackBufferFormat = D3DFMT_A8R8G8B8;
+    g_d3dpp.BackBufferWidth = WIN_W;
+    g_d3dpp.BackBufferHeight = WIN_H;
+    g_d3dpp.EnableAutoDepthStencil = TRUE;
+    g_d3dpp.AutoDepthStencilFormat = D3DFMT_D16;
+    g_d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+
+    HRESULT hr = g_pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hWnd,
+        D3DCREATE_SOFTWARE_VERTEXPROCESSING, &g_d3dpp, &g_pd3dDevice);
+    return SUCCEEDED(hr);
+}
+
+static void ResetDevice() {
+    ImGui_ImplDX9_InvalidateDeviceObjects();
+    RECT rc;
+    GetClientRect(g_hWnd, &rc);
+    g_d3dpp.BackBufferWidth = rc.right;
+    g_d3dpp.BackBufferHeight = rc.bottom;
+    HRESULT hr = g_pd3dDevice->Reset(&g_d3dpp);
+    if (SUCCEEDED(hr))
+        ImGui_ImplDX9_CreateDeviceObjects();
+}
+
+static void CleanupDevice() {
+    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
+    if (g_pD3D) { g_pD3D->Release(); g_pD3D = nullptr; }
+}
+
+static void RenderUI() {
+    ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(displaySize);
+    ImGui::Begin("##Main", nullptr,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+
+    bool inj = g_injected.load();
+    bool conn = g_connecting.load();
+    SharedMemory snap = {};
+    if (g_pShared) memcpy(&snap, g_pShared, sizeof(snap));
+
+    ImGui::PushFont(g_fontBold);
+    if (!inj && !conn) {
+        ImGui::TextColored(ImVec4(0.94f, 0.78f, 0.24f, 1.0f), "Scanning for SonicRacingCrossWorldsSteam.exe ...");
+    } else if (conn) {
+        ImGui::TextColored(ImVec4(0.94f, 0.78f, 0.24f, 1.0f), "Connecting ...");
+    } else if (snap.active) {
+        ImGui::TextColored(ImVec4(0.31f, 0.78f, 0.47f, 1.0f), "Connected to PID %lu", g_targetPid);
+    } else {
+        ImGui::TextColored(ImVec4(0.94f, 0.78f, 0.24f, 1.0f), "Connected to PID %lu (waiting ...)", g_targetPid);
+    }
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextDisabled("NOW PLAYING");
+    ImGui::PushFont(g_fontBold);
+    const char* trackName = (inj && snap.currentTrack[0]) ? snap.currentTrack : "(none)";
+    ImGui::TextColored(ImVec4(0.31f, 0.71f, 1.0f, 1.0f), "%s", trackName);
+    ImGui::PopFont();
+
+    ImGui::TextDisabled("Pool: %s    Volume: %d%%",
+        (inj && snap.poolName[0]) ? snap.poolName : "--",
+        (int)(g_customBgmVolume.load() * 100));
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    float btnW = 70.0f;
+    float btnH = 36.0f;
+    float totalBtnW = btnW * 4 + ImGui::GetStyle().ItemSpacing.x * 3;
+    float btnX = (displaySize.x - totalBtnW) / 2.0f;
+    ImGui::SetCursorPosX(btnX);
+
+    if (ImGui::Button("|<", ImVec2(btnW, btnH))) DoPrev();
+    ImGui::SameLine();
+    const char* playLabel = g_paused.load() ? ">" : "||";
+    if (ImGui::Button(playLabel, ImVec2(btnW, btnH))) DoPlayPause();
+    ImGui::SameLine();
+    if (ImGui::Button(">|", ImVec2(btnW, btnH))) DoSkip();
+    ImGui::SameLine();
+    if (ImGui::Button("[]", ImVec2(btnW, btnH))) DoStop();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    static int currentTab = 0;
+    const char* tabNames[] = { "BGM", "Lobby", "Title" };
+    int counts[] = { (int)g_bgmPool.size(), (int)g_lobbyPool.size(), (int)g_titlePool.size() };
+
+    if (ImGui::BeginTabBar("##Tabs", ImGuiTabBarFlags_NoCloseWithMiddleMouseButton)) {
+        for (int i = 0; i < 3; i++) {
+            char label[64];
+            snprintf(label, sizeof(label), "%s (%d)", tabNames[i], counts[i]);
+            if (ImGui::BeginTabItem(label)) {
+                currentTab = i;
+                ImGui::EndTabItem();
+            }
+        }
+        ImGui::EndTabBar();
+    }
+
+    std::string curTrack;
+    {
+        std::lock_guard<std::mutex> lock(g_trackNameMutex);
+        curTrack = g_currentTrackName;
+    }
+
+    float trackListH = ImGui::GetContentRegionAvail().y - 80.0f;
+    if (trackListH < 100.0f) trackListH = 100.0f;
+    ImGui::BeginChild("##TrackList", ImVec2(0, trackListH), true);
+    std::vector<CompressedAudio>* pools[] = { &g_bgmPool, &g_lobbyPool, &g_titlePool };
+    std::vector<CompressedAudio>* pool = pools[currentTab];
+
+    if (pool->empty()) {
+        ImGui::TextDisabled("No tracks loaded");
+    } else {
+        for (int i = 0; i < (int)pool->size(); i++) {
+            std::string name = ExtractFilename((*pool)[i].filename);
+            bool isPlaying = g_bgmActive.load() && curTrack == name;
+            char label[512];
+            snprintf(label, sizeof(label), "%s%s", isPlaying ? "> " : "  ", name.c_str());
+
+            if (isPlaying) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.31f, 0.71f, 1.0f, 1.0f));
+
+            if (ImGui::Selectable(label, false, ImGuiSelectableFlags_AllowDoubleClick)) {
+                if (g_audioInitialized.load()) {
+                    g_audio.StopCategoryImmediate(0);
+                    PlayTrack((*pool)[i], g_customBgmVolume.load(), 0, !g_playNewMusic);
+                    g_bgmActive.store(true);
+                    g_paused.store(false);
+                    g_playedFinish.store(false);
+                    g_activePool = currentTab;
+                    UpdateSharedStatus(name.c_str(), tabNames[currentTab], g_customBgmVolume.load(), true);
+                }
+            }
+
+            if (isPlaying) ImGui::PopStyleColor();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+
+    if (ImGui::Checkbox("Shuffle (play next after song ends)", &g_playNewMusic)) {
+        SaveSettings();
+    }
+
+    ImGui::Spacing();
+
+    float vol = g_customBgmVolume.load();
+    if (ImGui::SliderFloat("Volume", &vol, 0.0f, 5.0f, "%.0f%%")) {
+        g_customBgmVolume.store(vol);
+        if (g_audioInitialized.load()) g_audio.SetCategoryVolume(0, vol);
+        if (g_pShared) g_pShared->volume = vol;
+        SaveSettings();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("Ctrl+Up/Down: Vol  |  Ctrl+Right: Skip  |  Ctrl+Left: Prev  |  Ctrl+O: Inject");
+
+    ImGui::End();
+
+    if (g_showProcessPopup) {
+        g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
+        ImGui::OpenPopup("Select Process");
+        g_showProcessPopup = false;
+    }
+
+    if (ImGui::BeginPopupModal("Select Process", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (g_processList.empty()) {
+            ImGui::Text("No processes found.");
+        } else {
+            ImGui::Text("Select a process to inject into:");
+            ImGui::Spacing();
+            for (size_t i = 0; i < g_processList.size(); i++) {
+                char label[256];
+                snprintf(label, sizeof(label), "PID %lu - %ls", g_processList[i].pid, g_processList[i].name.c_str());
+                if (ImGui::Selectable(label)) {
+                    DoInject(g_processList[i].pid);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Refresh")) {
+            g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam))
+        return true;
+
+    switch (msg) {
+    case WM_SIZE:
+        if (g_pd3dDevice && wParam != SIZE_MINIMIZED) {
+            ResetDevice();
+        }
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DESTROY:
+        g_scanRunning = false;
+        g_audioThreadRunning = false;
+        CloseSharedMemory();
+        CleanupDevice();
+        ImGui_ImplDX9_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        PostQuitMessage(0);
+        return 0;
+    case WM_APP_GONE:
+        DoDisconnect();
+        g_gameGone = false;
+        return 0;
+    }
+    return DefWindowProcA(hWnd, msg, wParam, lParam);
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    SetProcessDPIAware();
+    g_hInst = hInstance;
+
+    SECURITY_DESCRIPTOR sd;
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), &sd, FALSE };
+    g_hSharedMap = CreateFileMappingA(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(SharedMemory), SHARED_MEMORY_NAME);
+    if (g_hSharedMap) g_pShared = (SharedMemory*)MapViewOfFile(g_hSharedMap, FILE_MAP_WRITE, 0, 0, sizeof(SharedMemory));
+
+    std::thread(InitAudio).detach();
+
+    WNDCLASSEXA wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = "SonicCustomBGM_ImGui";
+    RegisterClassExA(&wc);
+
+    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+    g_hWnd = CreateWindowExA(0, wc.lpszClassName, WINDOW_TITLE,
+        WS_OVERLAPPEDWINDOW,
+        (sw - WIN_W) / 2, (sh - WIN_H) / 2, WIN_W, WIN_H, NULL, NULL, hInstance, nullptr);
+
+    if (!CreateDeviceD3D(g_hWnd)) {
+        CleanupDevice();
+        return 1;
+    }
+
+    ShowWindow(g_hWnd, SW_SHOW);
+    UpdateWindow(g_hWnd);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 0;
+    style.FrameRounding = 3;
+    style.GrabRounding = 3;
+    style.WindowPadding = ImVec2(12, 12);
+    style.FramePadding = ImVec2(10, 6);
+    style.ItemSpacing = ImVec2(10, 8);
+    style.ScrollbarSize = 16;
+    style.ScrollbarRounding = 3;
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_WindowBg] = ImVec4(0.094f, 0.094f, 0.125f, 1.000f);
+    colors[ImGuiCol_ChildBg] = ImVec4(0.125f, 0.125f, 0.173f, 1.000f);
+    colors[ImGuiCol_PopupBg] = ImVec4(0.118f, 0.118f, 0.157f, 0.960f);
+    colors[ImGuiCol_Border] = ImVec4(0.235f, 0.235f, 0.314f, 0.500f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.160f, 0.160f, 0.220f, 1.000f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.240f, 0.240f, 0.320f, 1.000f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.120f, 0.120f, 0.180f, 1.000f);
+    colors[ImGuiCol_TitleBg] = ImVec4(0.094f, 0.094f, 0.125f, 1.000f);
+    colors[ImGuiCol_TitleBgActive] = ImVec4(0.094f, 0.094f, 0.125f, 1.000f);
+    colors[ImGuiCol_MenuBarBg] = ImVec4(0.125f, 0.125f, 0.173f, 1.000f);
+    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.094f, 0.094f, 0.125f, 0.500f);
+    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.200f, 0.200f, 0.280f, 1.000f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.280f, 0.280f, 0.380f, 1.000f);
+    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.160f, 0.160f, 0.220f, 1.000f);
+    colors[ImGuiCol_CheckMark] = ImVec4(0.863f, 0.863f, 0.902f, 1.000f);
+    colors[ImGuiCol_SliderGrab] = ImVec4(0.314f, 0.706f, 1.000f, 1.000f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.400f, 0.800f, 1.000f, 1.000f);
+    colors[ImGuiCol_Button] = ImVec4(0.196f, 0.196f, 0.267f, 1.000f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.275f, 0.275f, 0.376f, 1.000f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.157f, 0.157f, 0.220f, 1.000f);
+    colors[ImGuiCol_Header] = ImVec4(0.196f, 0.196f, 0.267f, 1.000f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.275f, 0.275f, 0.376f, 1.000f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.157f, 0.157f, 0.220f, 1.000f);
+    colors[ImGuiCol_Tab] = ImVec4(0.125f, 0.125f, 0.173f, 1.000f);
+    colors[ImGuiCol_TabHovered] = ImVec4(0.275f, 0.275f, 0.376f, 1.000f);
+    colors[ImGuiCol_TabActive] = ImVec4(0.196f, 0.196f, 0.267f, 1.000f);
+    colors[ImGuiCol_TabUnfocused] = ImVec4(0.125f, 0.125f, 0.173f, 1.000f);
+    colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.196f, 0.196f, 0.267f, 1.000f);
+    colors[ImGuiCol_Separator] = ImVec4(0.235f, 0.235f, 0.314f, 0.500f);
+    colors[ImGuiCol_Text] = ImVec4(0.863f, 0.863f, 0.902f, 1.000f);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.510f, 0.510f, 0.588f, 1.000f);
+
+    char winDir[MAX_PATH];
+    GetWindowsDirectoryA(winDir, MAX_PATH);
+    std::string segoeui = std::string(winDir) + "\\Fonts\\segoeui.ttf";
+    std::string segoeuib = std::string(winDir) + "\\Fonts\\segoeuib.ttf";
+    std::string consola = std::string(winDir) + "\\Fonts\\consola.ttf";
+
+    g_fontRegular = io.Fonts->AddFontFromFileTTF(segoeui.c_str(), 18.0f);
+    if (!g_fontRegular) g_fontRegular = io.Fonts->AddFontDefault();
+    g_fontBold = io.Fonts->AddFontFromFileTTF(segoeuib.c_str(), 19.0f);
+    if (!g_fontBold) g_fontBold = g_fontRegular;
+    g_fontMono = io.Fonts->AddFontFromFileTTF(consola.c_str(), 16.0f);
+    if (!g_fontMono) g_fontMono = g_fontRegular;
+
+    ImGui_ImplWin32_Init(g_hWnd);
+    ImGui_ImplDX9_Init(g_pd3dDevice);
+
+    std::thread(AudioThread).detach();
+    std::thread(AutoInjectThread).detach();
+
+    auto lastHotkeyCheck = std::chrono::steady_clock::now();
+    auto lastMuteCheck = std::chrono::steady_clock::now();
+
+    bool running = true;
+    MSG msg;
+    while (running) {
+        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { running = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!running) break;
+
+        if (g_gameGone) {
+            DoDisconnect();
+            g_gameGone = false;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHotkeyCheck).count() >= 50) {
+            HandleHotkeys();
+            lastHotkeyCheck = now;
+        }
+
+        if (g_muteOnUnfocus && g_audioInitialized.load()) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMuteCheck).count() >= 200) {
+                DWORD fgPid = 0;
+                HWND fg = GetForegroundWindow();
+                if (fg) GetWindowThreadProcessId(fg, &fgPid);
+                bool unfocused = (fgPid != GetCurrentProcessId() && fgPid != g_targetPid);
+                g_audio.SetCategoryVolume(0, unfocused ? 0.0f : g_customBgmVolume.load());
+                lastMuteCheck = now;
+            }
+        }
+
+        if (IsIconic(g_hWnd)) {
+            Sleep(50);
+            continue;
+        }
+
+        ImGui_ImplDX9_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        RenderUI();
+
+        ImGui::Render();
+        g_pd3dDevice->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(24, 24, 32), 1.0f, 0);
+        if (SUCCEEDED(g_pd3dDevice->BeginScene())) {
+            ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+            g_pd3dDevice->EndScene();
+        }
+        g_pd3dDevice->Present(NULL, NULL, NULL, NULL);
+    }
+
+    g_scanRunning = false;
+    g_audioThreadRunning = false;
+    return (int)msg.wParam;
+}

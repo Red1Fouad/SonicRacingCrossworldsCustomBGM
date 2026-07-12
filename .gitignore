@@ -1,0 +1,17 @@
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.log
+*.tmp
+*.zip
+*.ini
+*.txt
+imgui.ini
+settings.txt
+music/
+music_lobby/
+music_title/
