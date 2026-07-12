@@ -38,7 +38,7 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static const char* WINDOW_TITLE = "Sonic Custom BGM";
-static const int WIN_W = 640;
+static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
 #define WM_TRAYICON (WM_APP + 1)
@@ -1098,6 +1098,8 @@ static bool PassesFilter(const std::string& name) {
 
 static void RenderHotkeyWindow() {
     if (!g_showHotkeyWindow) return;
+    ImVec2 ds = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2((ds.x - 520) * 0.5f, (ds.y - 280) * 0.5f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(520, 280), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Configure Hotkeys", &g_showHotkeyWindow)) { ImGui::End(); return; }
 
