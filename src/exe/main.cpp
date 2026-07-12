@@ -35,7 +35,8 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-static const char* WINDOW_TITLE = "Sonic Custom BGM";
+static const char* APP_VERSION = "0.1.0";
+static const char* WINDOW_TITLE = "Sonic Custom BGM v0.1.0";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
@@ -1625,7 +1626,7 @@ static void RenderUI() {
 
     if (ImGui::BeginPopupModal("About", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::PushFont(g_fontBold);
-        ImGui::Text("Sonic Custom BGM");
+        ImGui::Text("Sonic Custom BGM v%s", APP_VERSION);
         ImGui::PopFont();
         ImGui::TextDisabled("Replace game BGM with your own music");
         ImGui::Spacing();
