@@ -42,6 +42,7 @@ struct CompressedAudio {
     std::string filename;
     float weight = 1.0f;
     float volumeMul = 1.0f;
+    float durationSec = 0.0f;
 };
 
 class AudioLoader {
@@ -102,6 +103,72 @@ public:
         if (ext == ".aac" || ext == ".m4a") return DecodeAacMemory(input.data, outData);
         if (ext == ".aax") return DecodeAaxMemory(input.data, outData);
         return false;
+    }
+
+    static float EstimateDuration(const CompressedAudio& input) {
+        const std::string& ext = input.extension;
+        const auto& d = input.data;
+        if (ext == ".wav" && d.size() >= 44) {
+            if (memcmp(d.data(), "RIFF", 4) != 0) return 0.0f;
+            size_t pos = 12;
+            uint32_t byteRate = 0, dataSize = 0;
+            while (pos + 8 <= d.size()) {
+                uint32_t cs; memcpy(&cs, d.data() + pos + 4, 4);
+                if (memcmp(d.data() + pos, "fmt ", 4) == 0 && pos + 24 <= d.size())
+                    memcpy(&byteRate, d.data() + pos + 8 + 12, 4);
+                else if (memcmp(d.data() + pos, "data", 4) == 0)
+                    dataSize = cs;
+                pos += 8 + cs;
+                if (cs % 2 != 0) pos++;
+            }
+            if (byteRate > 0 && dataSize > 0) return (float)dataSize / (float)byteRate;
+        }
+        if (ext == ".mp3") {
+#ifdef ENABLE_MP3
+            drmp3 mp3;
+            if (drmp3_init_memory(&mp3, d.data(), d.size(), NULL)) {
+                float dur = (float)drmp3_get_pcm_frame_count(&mp3) / (float)mp3.sampleRate;
+                drmp3_uninit(&mp3);
+                return dur;
+            }
+#endif
+        }
+        if (ext == ".ogg") {
+#ifdef ENABLE_OGG
+            int err; stb_vorbis* v = stb_vorbis_open_memory(d.data(), (int)d.size(), &err, NULL);
+            if (v) {
+                stb_vorbis_info inf = stb_vorbis_get_info(v);
+                int samps = stb_vorbis_stream_length_in_samples(v);
+                stb_vorbis_close(v);
+                if (inf.sample_rate > 0) return (float)samps / (float)inf.sample_rate;
+            }
+#endif
+        }
+        if (ext == ".flac") {
+#ifdef ENABLE_FLAC
+            drflac* f = drflac_open_memory(d.data(), d.size(), NULL);
+            if (f) { float dur = (float)f->totalPCMFrameCount / (float)f->sampleRate; drflac_close(f); return dur; }
+#endif
+        }
+        if (ext == ".adx" && d.size() >= 16) {
+            uint32_t sr = ((uint32_t)d[8] << 24) | ((uint32_t)d[9] << 16) | ((uint32_t)d[10] << 8) | d[11];
+            uint32_t ts = ((uint32_t)d[12] << 24) | ((uint32_t)d[13] << 16) | ((uint32_t)d[14] << 8) | d[15];
+            if (sr > 0) return (float)ts / (float)sr;
+        }
+        if (ext == ".brstm" && d.size() >= 0x80) {
+            auto r16 = [&](size_t o) -> uint16_t { return (uint16_t)d[o] << 8 | d[o + 1]; };
+            auto r32 = [&](size_t o) -> uint32_t { return (uint32_t)d[o] << 24 | (uint32_t)d[o + 1] << 16 | (uint32_t)d[o + 2] << 8 | d[o + 3]; };
+            uint32_t hdOff = r32(0x10);
+            if (hdOff + 4 <= d.size() && memcmp(d.data() + hdOff, "HEAD", 4) == 0) {
+                uint32_t h1o = r32(hdOff + 0x0C) + 8;
+                if (hdOff + h1o + 0x10 <= d.size()) {
+                    uint32_t srate = r16(hdOff + h1o + 4);
+                    uint32_t totalSamp = r32(hdOff + h1o + 0x0C);
+                    if (srate > 0) return (float)totalSamp / (float)srate;
+                }
+            }
+        }
+        return 0.0f;
     }
 
 private:
