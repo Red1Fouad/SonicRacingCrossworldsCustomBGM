@@ -487,19 +487,24 @@ static void PollKeyboardRecording() {
 
 static void PollControllerRecording() {
     if (!g_recordingController || g_recordingAction < 0 || !g_gameController) return;
-    int cur[5] = {-1,-1,-1,-1,-1};
-    int cnt = 0; bool any = false;
-    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX && cnt < 4; b++) {
+    bool any = false;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
         if (SDL_GameControllerGetButton(g_gameController, (SDL_GameControllerButton)b)) {
             any = true;
-            cur[cnt++] = b;
+            bool found = false;
+            for (int i = 0; i < 5; i++) { if (g_gpPeakButtons[i] == b) { found = true; break; } }
+            if (!found) {
+                for (int i = 0; i < 4; i++) {
+                    if (g_gpPeakButtons[i] == -1) { g_gpPeakButtons[i] = b; break; }
+                }
+            }
         }
     }
     if (any) {
         g_gpWasPressed = true;
-        memcpy(g_gpPeakButtons, cur, sizeof(g_gpPeakButtons));
     } else if (g_gpWasPressed) {
         memcpy(g_hotkeys[g_recordingAction].gp.buttons, g_gpPeakButtons, sizeof(g_gpPeakButtons));
+        memset(g_gpPeakButtons, -1, sizeof(g_gpPeakButtons));
         g_gpWasPressed = false;
         g_recordingController = false;
         g_recordingAction = -1;
@@ -1111,7 +1116,7 @@ static void RenderHotkeyWindow() {
                 if (ImGui::SmallButton("Listening...")) { g_recordingController = false; g_recordingAction = -1; }
                 ImGui::PopStyleColor();
             } else {
-                if (ImGui::SmallButton(gpBuf)) { g_recordingController = true; g_recordingKeyboard = false; g_recordingAction = a.action; }
+                if (ImGui::SmallButton(gpBuf)) { g_recordingController = true; g_recordingKeyboard = false; g_recordingAction = a.action; memset(g_gpPeakButtons, -1, sizeof(g_gpPeakButtons)); }
             }
         }
         ImGui::EndTable();
