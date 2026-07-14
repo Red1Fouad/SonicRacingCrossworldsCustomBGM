@@ -7,7 +7,7 @@ Drop your audio files into folders next to the EXE, launch the app, and play the
 ## Quick Start
 
 1. Download the latest release from [Releases](https://github.com/Red1Fouad/SonicRacingCrossworldsCustomBGM/releases)
-2. Extract `SonicCustomBGM.exe` and `SonicCustomBGM.dll` into a folder
+2. Extract `SonicCustomBGM.exe`, `SonicCustomBGM.dll` and `SDL2.dll` into a folder
 3. Create music folders next to the EXE:
    - `music/` — race BGM
    - `music_lobby/` — lobby BGM
