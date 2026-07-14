@@ -1492,6 +1492,7 @@ static void RenderCreditsPopup() {
     ImGui::TextDisabled("  dr_flac             - David Reid");
     ImGui::TextDisabled("  stb_vorbis          - Sean Barrett");
     ImGui::TextDisabled("  libhelix-aac        - Ahead Software / RealNetworks");
+    ImGui::TextDisabled("  vgmstream           - bnnm, etc.");
     ImGui::TextDisabled("  XAudio2             - Microsoft");
     ImGui::TextDisabled("  Direct3D 9          - Microsoft");
 
