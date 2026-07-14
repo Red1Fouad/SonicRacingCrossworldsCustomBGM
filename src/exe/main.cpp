@@ -16,6 +16,30 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+
+static std::ofstream g_logFile;
+static std::mutex g_logMutex;
+static void LogInit() {
+    wchar_t wPath[MAX_PATH];
+    GetModuleFileNameW(NULL, wPath, MAX_PATH);
+    int len = WideCharToMultiByte(CP_UTF8, 0, wPath, -1, nullptr, 0, nullptr, nullptr);
+    std::string path(len - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wPath, -1, &path[0], len, nullptr, nullptr);
+    path = path.substr(0, path.find_last_of("\\/")) + "\\SonicCustomBGM.log";
+    g_logFile.open(path, std::ios::out | std::ios::trunc);
+}
+static void Log(const char* fmt, ...) {
+    if (!g_logFile.is_open()) return;
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logFile << buf << std::endl;
+    g_logFile.flush();
+}
+
 #define DR_MP3_IMPLEMENTATION
 #define DR_FLAC_IMPLEMENTATION
 #include "audio_engine.h"
@@ -26,6 +50,9 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx9.h"
 
+#include "sprites_data.h"
+#include <cmath>
+
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 
@@ -35,8 +62,8 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-static const char* APP_VERSION = "0.1.1";
-static const char* WINDOW_TITLE = "Sonic Custom BGM v" "0.1.1";
+static const char* APP_VERSION = "1.0.0";
+static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v" "0.1.1";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
@@ -56,6 +83,17 @@ static D3DPRESENT_PARAMETERS g_d3dpp = {};
 static ImFont* g_fontRegular = nullptr;
 static ImFont* g_fontBold = nullptr;
 static ImFont* g_fontMono = nullptr;
+
+static IDirect3DTexture9* g_sprIdle[32] = {};
+static IDirect3DTexture9* g_sprMove[32] = {};
+static int g_sprIdleCount = 0;
+static int g_sprMoveCount = 0;
+static int g_sprFrame = 0;
+static float g_sprTimer = 0.0f;
+static bool g_sprWasActive = false;
+static const float SPR_IDLE_SPEED = 0.24f;
+static const float SPR_MOVE_SPEED = 0.05f;
+static const float SPR_SIZE = 240.0f;
 
 static AudioEngine g_audio;
 static std::vector<CompressedAudio> g_bgmPool, g_lobbyPool, g_titlePool;
@@ -85,9 +123,10 @@ static std::vector<ProcessInfo> g_processList;
 static bool g_gameGone = false;
 
 static std::set<std::string> g_favorites;
-static std::string g_searchFilter;
 static char g_searchBuf[256] = "";
 static bool g_favoritesOnly = false;
+static bool g_skipLeadingSilence = false;
+static bool g_showMegaManX = true;
 static int g_themeIndex = 0;
 static bool g_minimizeToTray = false;
 static bool g_autostartEnabled = false;
@@ -227,18 +266,22 @@ static int GetNextIndex(std::vector<CompressedAudio>& pool, std::vector<int>& or
 }
 
 static void LoadMusicFromDir(const std::string& dir, std::vector<CompressedAudio>& pool) {
+    Log("LoadMusicFromDir: %s", dir.c_str());
     auto meta = ParseTrackMeta(dir);
     std::wstring wdir = Utf8ToWide(dir);
-    for (const wchar_t* ext : { L"\\*.wav", L"\\*.mp3", L"\\*.ogg", L"\\*.adx", L"\\*.brstm", L"\\*.flac", L"\\*.aac", L"\\*.m4a", L"\\*.aax" }) {
+    for (const wchar_t* ext : { L"\\*.wav", L"\\*.mp3", L"\\*.ogg", L"\\*.adx", L"\\*.brstm", L"\\*.bcstm", L"\\*.bfstm", L"\\*.bwav", L"\\*.bcwav", L"\\*.bfwav", L"\\*.flac", L"\\*.aac", L"\\*.m4a", L"\\*.aax" }) {
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW((wdir + ext).c_str(), &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
             do {
                 if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
                 std::string name = WideToUtf8(fd.cFileName);
+                Log("LoadMusicFromDir: Trying %s", name.c_str());
                 CompressedAudio ca;
                 if (AudioLoader::LoadCompressed(dir + "\\" + name, ca)) {
+                    Log("LoadMusicFromDir: Loaded %s, estimating duration", name.c_str());
                     ca.durationSec = AudioLoader::EstimateDuration(ca);
+                    Log("LoadMusicFromDir: %s OK, dur=%.1f", name.c_str(), ca.durationSec);
                     auto it = meta.find(name);
                     if (it != meta.end()) { ca.weight = it->second.weight; ca.volumeMul = it->second.volumeMul; }
                     pool.push_back(std::move(ca));
@@ -246,6 +289,14 @@ static void LoadMusicFromDir(const std::string& dir, std::vector<CompressedAudio
             } while (FindNextFileW(hFind, &fd));
             FindClose(hFind);
         }
+    }
+}
+
+static void UpdateSharedTrackFlags() {
+    if (g_pShared) {
+        g_pShared->hasBgmTracks = !g_bgmPool.empty();
+        g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
+        g_pShared->hasTitleTracks = !g_titlePool.empty();
     }
 }
 
@@ -573,6 +624,8 @@ static void SaveSettings() {
         out << "Theme: " << g_themeIndex << "\n";
         out << "MinimizeToTray: " << (g_minimizeToTray ? "true" : "false") << "\n";
         out << "FavoritesOnly: " << (g_favoritesOnly ? "true" : "false") << "\n";
+        out << "SkipLeadingSilence: " << (g_skipLeadingSilence ? "true" : "false") << "\n";
+        out << "ShowMegaManX: " << (g_showMegaManX ? "true" : "false") << "\n";
     }
 }
 
@@ -595,11 +648,42 @@ static void GetPool(int pid, std::vector<CompressedAudio>*& pool, std::vector<in
 }
 
 static void PlayTrack(CompressedAudio& audio, float volume, int categoryId, bool allowLoop) {
+    Log("PlayTrack: Decoding %s (%s)", audio.filename.c_str(), audio.extension.c_str());
     WavData data;
-    if (!AudioLoader::DecodeToPcm(audio, data)) return;
+    if (!AudioLoader::DecodeToPcm(audio, data)) {
+        Log("PlayTrack: Decode FAILED for %s", audio.filename.c_str());
+        return;
+    }
+    Log("PlayTrack: Decoded OK, %d bytes PCM", (int)data.audioData.size());
     AudioLoader::NormalizePcm16(data);
     AudioLoader::ScalePcm16(data, audio.volumeMul);
+    if (g_skipLeadingSilence) {
+        const std::string& ext = audio.extension;
+        if (ext != ".adx" && ext != ".aax" && ext != ".brstm" &&
+            ext != ".bcstm" && ext != ".bfstm" && ext != ".bwav" &&
+            ext != ".bcwav" && ext != ".bfwav")
+            AudioLoader::TrimLeadingSilence(data);
+    }
     g_audio.PlayPreloaded(data, volume, categoryId, allowLoop);
+}
+
+static void NotifyTrackPlaying(const char* trackName, const char* poolName, int poolIdx, float vol) {
+    g_bgmActive.store(true);
+    g_paused.store(false);
+    g_playedFinish.store(false);
+    UpdateSharedStatus(trackName, poolName, vol, true);
+    AddRecent(trackName, poolIdx);
+}
+
+static void PlayTrackFromPool(int poolIdx, int trackIdx) {
+    std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* poolName;
+    GetPool(poolIdx, pool, order, pos, poolName);
+    if (trackIdx < 0 || trackIdx >= (int)pool->size()) return;
+    g_audio.StopCategoryImmediate(0);
+    PlayTrack((*pool)[trackIdx], g_customBgmVolume.load(), 0, !g_playNewMusic);
+    g_activePool = poolIdx;
+    std::string name = ExtractFilename((*pool)[trackIdx].filename);
+    NotifyTrackPlaying(name.c_str(), poolName, poolIdx, g_customBgmVolume.load());
 }
 
 static void DoPlayPause() {
@@ -617,11 +701,7 @@ static void DoPlayPause() {
             int idx = GetNextIndex(*pool, *order, *pos);
             if (idx < 0) return;
             PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
-            g_bgmActive.store(true);
-            g_playedFinish.store(false);
-            g_paused.store(false);
-            UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
-            AddRecent(ExtractFilename((*pool)[idx].filename), g_activePool);
+            NotifyTrackPlaying(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_activePool, g_customBgmVolume.load());
         }
     }
 }
@@ -643,11 +723,7 @@ static void DoSkip() {
         if (idx < 0) return;
         g_audio.StopCategoryImmediate(0);
         PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
-        g_bgmActive.store(true);
-        g_paused.store(false);
-        g_playedFinish.store(false);
-        UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
-        AddRecent(ExtractFilename((*pool)[idx].filename), g_activePool);
+        NotifyTrackPlaying(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_activePool, g_customBgmVolume.load());
     }
 }
 
@@ -661,11 +737,7 @@ static void DoPrev() {
         if (idx < 0) { DoStop(); return; }
         g_audio.StopCategoryImmediate(0);
         PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, !g_playNewMusic);
-        g_bgmActive.store(true);
-        g_paused.store(false);
-        g_playedFinish.store(false);
-        UpdateSharedStatus(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_customBgmVolume.load(), true);
-        AddRecent(ExtractFilename((*pool)[idx].filename), g_activePool);
+        NotifyTrackPlaying(ExtractFilename((*pool)[idx].filename).c_str(), pn, g_activePool, g_customBgmVolume.load());
     } else {
         DoStop();
     }
@@ -693,9 +765,7 @@ static void OnTrackFinished() {
 static void AudioThread() {
     while (g_audioThreadRunning) {
         if (g_pShared && g_audioInitialized.load()) {
-            g_pShared->hasBgmTracks = !g_bgmPool.empty();
-            g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
-            g_pShared->hasTitleTracks = !g_titlePool.empty();
+            UpdateSharedTrackFlags();
         }
         if (g_injected.load() && g_pShared && g_audioInitialized.load()) {
             if (InterlockedCompareExchange(&g_pShared->cmdReady, 0, 1) == 1) {
@@ -715,11 +785,8 @@ static void AudioThread() {
                             int idx = GetNextIndex(*pool, *order, *pos);
                             if (idx >= 0) {
                                 PlayTrack((*pool)[idx], vol, 0, allowLoop);
-                                g_bgmActive.store(true);
-                                g_paused.store(false);
                                 std::string name = ExtractFilename((*pool)[idx].filename);
-                                UpdateSharedStatus(name.c_str(), poolName, vol, true);
-                                AddRecent(name, poolId);
+                                NotifyTrackPlaying(name.c_str(), poolName, poolId, vol);
                             }
                         }
                     }
@@ -743,13 +810,20 @@ static void AudioThread() {
 }
 
 static void InitAudio() {
+    Log("InitAudio: Starting");
     std::string dir = GetExeDir();
     CreateDirectoryA((dir + "\\music").c_str(), NULL);
     CreateDirectoryA((dir + "\\music_lobby").c_str(), NULL);
     CreateDirectoryA((dir + "\\music_title").c_str(), NULL);
+    Log("InitAudio: Loading BGM pool");
     LoadMusicFromDir(dir + "\\music", g_bgmPool);
+    Log("InitAudio: BGM pool: %d tracks", (int)g_bgmPool.size());
+    Log("InitAudio: Loading lobby pool");
     LoadMusicFromDir(dir + "\\music_lobby", g_lobbyPool);
+    Log("InitAudio: Lobby pool: %d tracks", (int)g_lobbyPool.size());
+    Log("InitAudio: Loading title pool");
     LoadMusicFromDir(dir + "\\music_title", g_titlePool);
+    Log("InitAudio: Title pool: %d tracks", (int)g_titlePool.size());
     LoadFavorites();
     LoadRecent();
     LoadHotkeys();
@@ -773,6 +847,8 @@ static void InitAudio() {
             }
             if (line.find("MinimizeToTray:") != std::string::npos) g_minimizeToTray = (line.find("true") != std::string::npos);
             if (line.find("FavoritesOnly:") != std::string::npos) g_favoritesOnly = (line.find("true") != std::string::npos);
+            if (line.find("SkipLeadingSilence:") != std::string::npos) g_skipLeadingSilence = (line.find("true") != std::string::npos);
+            if (line.find("ShowMegaManX:") != std::string::npos) g_showMegaManX = (line.find("true") != std::string::npos);
         }
     }
 
@@ -784,10 +860,12 @@ static void InitAudio() {
     }
 
     if (g_audio.Init()) {
+        Log("InitAudio: Audio engine initialized OK");
         g_audio.OnTrackFinished = OnTrackFinished;
         g_audioInitialized.store(true);
-    }
+    } else { Log("InitAudio: Audio engine init FAILED"); }
     g_settingsLoaded.store(true);
+    Log("InitAudio: Done");
 }
 
 static void SetAutostart(bool enable) {
@@ -850,7 +928,7 @@ static void AddTrayIcon(HWND hWnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = g_trayIcon;
-    strncpy_s(g_nid.szTip, "Sonic Custom BGM", sizeof(g_nid.szTip));
+    strncpy_s(g_nid.szTip, "SRXCW Custom BGM", sizeof(g_nid.szTip));
     Shell_NotifyIconA(NIM_ADD, &g_nid);
     g_trayIconVisible = true;
 }
@@ -905,11 +983,7 @@ static void DoInject(DWORD pid) {
         g_targetPid = pid;
         Sleep(500);
         OpenSharedMemory();
-        if (g_pShared) {
-            g_pShared->hasBgmTracks = !g_bgmPool.empty();
-            g_pShared->hasLobbyTracks = !g_lobbyPool.empty();
-            g_pShared->hasTitleTracks = !g_titlePool.empty();
-        }
+        UpdateSharedTrackFlags();
     }
     g_connecting = false;
 }
@@ -996,6 +1070,52 @@ static bool CreateDeviceD3D(HWND hWnd) {
     g_d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
     HRESULT hr = g_pD3D->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hWnd,
         D3DCREATE_SOFTWARE_VERTEXPROCESSING, &g_d3dpp, &g_pd3dDevice);
+    if (SUCCEEDED(hr)) {
+        g_sprIdleCount = spr_idle_count;
+        g_sprMoveCount = spr_move_count;
+        for (int i = 0; i < g_sprIdleCount; i++) {
+            const SpriteFrame& f = spr_idle[i];
+            if (FAILED(g_pd3dDevice->CreateTexture(f.w, f.h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_sprIdle[i], nullptr)))
+                { g_sprIdleCount = i; break; }
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(g_sprIdle[i]->LockRect(0, &lr, nullptr, 0))) {
+                const uint8_t* src = f.data;
+                uint8_t* dst = (uint8_t*)lr.pBits;
+                for (int y = 0; y < f.h; y++) {
+                    uint8_t* row = dst + y * lr.Pitch;
+                    for (int x = 0; x < f.w; x++) {
+                        int si = (y * f.w + x) * 4;
+                        row[x*4+0] = src[si+2];
+                        row[x*4+1] = src[si+1];
+                        row[x*4+2] = src[si+0];
+                        row[x*4+3] = src[si+3];
+                    }
+                }
+                g_sprIdle[i]->UnlockRect(0);
+            }
+        }
+        for (int i = 0; i < g_sprMoveCount; i++) {
+            const SpriteFrame& f = spr_move[i];
+            if (FAILED(g_pd3dDevice->CreateTexture(f.w, f.h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_sprMove[i], nullptr)))
+                { g_sprMoveCount = i; break; }
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(g_sprMove[i]->LockRect(0, &lr, nullptr, 0))) {
+                const uint8_t* src = f.data;
+                uint8_t* dst = (uint8_t*)lr.pBits;
+                for (int y = 0; y < f.h; y++) {
+                    uint8_t* row = dst + y * lr.Pitch;
+                    for (int x = 0; x < f.w; x++) {
+                        int si = (y * f.w + x) * 4;
+                        row[x*4+0] = src[si+2];
+                        row[x*4+1] = src[si+1];
+                        row[x*4+2] = src[si+0];
+                        row[x*4+3] = src[si+3];
+                    }
+                }
+                g_sprMove[i]->UnlockRect(0);
+            }
+        }
+    }
     return SUCCEEDED(hr);
 }
 
@@ -1011,6 +1131,8 @@ static void ResetDevice() {
 }
 
 static void CleanupDevice() {
+    for (int i = 0; i < g_sprIdleCount; i++) { if (g_sprIdle[i]) { g_sprIdle[i]->Release(); g_sprIdle[i] = nullptr; } }
+    for (int i = 0; i < g_sprMoveCount; i++) { if (g_sprMove[i]) { g_sprMove[i]->Release(); g_sprMove[i] = nullptr; } }
     if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
     if (g_pD3D) { g_pD3D->Release(); g_pD3D = nullptr; }
 }
@@ -1192,6 +1314,188 @@ static void RenderHotkeyWindow() {
     ImGui::End();
 }
 
+static bool IconButton(const char* id, ImVec2 size) {
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, size);
+    ImU32 bg = ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive : (ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered : ImGuiCol_Button));
+    ImGui::GetWindowDrawList()->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 4.0f);
+    return ImGui::IsItemClicked();
+}
+
+static void DrawInfoIcon(ImVec2 center, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddCircleFilled(center, 9.0f, col);
+    dl->AddText(ImVec2(center.x - 3.5f, center.y - 7.0f), ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)), "i");
+}
+
+static void DrawGearIcon(ImVec2 center, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float outerR = 8.0f, innerR = 4.5f, toothH = 2.5f;
+    int teeth = 8;
+    for (int i = 0; i < teeth; i++) {
+        float a0 = (float)i / teeth * 6.283185f;
+        float a1 = a0 + (1.5f / teeth) * 6.283185f * 0.5f;
+        ImVec2 p0(center.x + cosf(a0) * outerR, center.y + sinf(a0) * outerR);
+        ImVec2 p1(center.x + cosf(a1) * (outerR + toothH), center.y + sinf(a1) * (outerR + toothH));
+        ImVec2 p2(center.x + cosf(a0 + 3.14159f / teeth) * (outerR + toothH), center.y + sinf(a0 + 3.14159f / teeth) * (outerR + toothH));
+        ImVec2 p3(center.x + cosf(a1 + 3.14159f / teeth * 2) * outerR, center.y + sinf(a1 + 3.14159f / teeth * 2) * outerR);
+        dl->AddQuadFilled(p0, p1, p2, p3, col);
+    }
+    dl->AddCircleFilled(center, outerR, ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)));
+    dl->AddCircleFilled(center, innerR, col);
+}
+
+static void DrawRefreshIcon(ImVec2 center, ImU32 col) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float r = 7.0f;
+    dl->AddCircle(center, r, col, 0, 1.5f);
+    for (int i = 0; i < 12; i++) {
+        float a0 = (float)i / 12 * 6.283185f - 1.2f;
+        float a1 = a0 + 0.35f;
+        dl->AddLine(
+            ImVec2(center.x + cosf(a0) * (r - 1), center.y + sinf(a0) * (r - 1)),
+            ImVec2(center.x + cosf(a1) * (r - 1), center.y + sinf(a1) * (r - 1)), col, 2.0f);
+    }
+    ImVec2 tip(center.x + cosf(-1.2f) * (r + 2), center.y + sinf(-1.2f) * (r + 2));
+    dl->AddTriangleFilled(tip, ImVec2(tip.x - 4, tip.y + 1), ImVec2(tip.x + 1, tip.y + 5), col);
+}
+
+static void DrawStar(ImDrawList* dl, ImVec2 center, float outerR, float innerR, ImU32 col) {
+    ImVec2 pts[10];
+    for (int i = 0; i < 10; i++) {
+        float a = (float)i / 10 * 6.283185f - 1.570796f;
+        float r = (i % 2 == 0) ? outerR : innerR;
+        pts[i] = ImVec2(center.x + cosf(a) * r, center.y + sinf(a) * r);
+    }
+    dl->AddConvexPolyFilled(pts, 10, col);
+}
+
+static void RenderSettingsPopup() {
+    if (g_showSettingsPopup) {
+        ImGui::OpenPopup("Settings");
+        g_showSettingsPopup = false;
+    }
+    if (!ImGui::BeginPopupModal("Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::Text("Playback");
+    ImGui::Indent();
+    if (ImGui::Checkbox("Shuffle (play next after song ends)", &g_playNewMusic)) SaveSettings();
+    if (ImGui::Checkbox("Mute when window loses focus", &g_muteOnUnfocus)) SaveSettings();
+    if (ImGui::Checkbox("Favorites only", &g_favoritesOnly)) SaveSettings();
+    if (ImGui::Checkbox("Skip leading silence", &g_skipLeadingSilence)) SaveSettings();
+    if (ImGui::Checkbox("Show Mega Man X", &g_showMegaManX)) SaveSettings();
+    ImGui::Unindent();
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    ImGui::Text("Appearance");
+    ImGui::Indent();
+    const char* themes[] = { "Dark", "Light", "High Contrast" };
+    if (ImGui::Combo("Theme", &g_themeIndex, themes, 3)) ApplyTheme(g_themeIndex);
+    ImGui::Unindent();
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    ImGui::Text("System");
+    ImGui::Indent();
+    if (ImGui::Checkbox("Minimize to system tray", &g_minimizeToTray)) SaveSettings();
+    if (ImGui::Checkbox("Start with Windows", &g_autostartEnabled)) SetAutostart(g_autostartEnabled);
+    ImGui::Unindent();
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    ImGui::Text("Controls");
+    ImGui::Indent();
+    if (ImGui::Button("Configure Hotkeys...")) { g_showHotkeyWindow = true; ImGui::CloseCurrentPopup(); }
+    ImGui::Unindent();
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    ImGui::Text("Favorites: %d tracks", (int)g_favorites.size());
+    ImGui::TextDisabled("Click the circle next to a track to toggle favorite");
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+static void RenderProcessPopup() {
+    if (g_showProcessPopup) {
+        g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
+        ImGui::OpenPopup("Select Process");
+        g_showProcessPopup = false;
+    }
+    if (!ImGui::BeginPopupModal("Select Process", NULL, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    if (g_processList.empty()) {
+        ImGui::Text("No processes found.");
+    } else {
+        ImGui::Text("Select a process to inject into:");
+        ImGui::Spacing();
+        for (size_t i = 0; i < g_processList.size(); i++) {
+            char label[256];
+            snprintf(label, sizeof(label), "PID %lu - %ls", g_processList[i].pid, g_processList[i].name.c_str());
+            if (ImGui::Selectable(label)) {
+                DoInject(g_processList[i].pid);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Refresh")) {
+        g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+static void RenderCreditsPopup() {
+    if (g_showCreditsPopup) {
+        ImGui::OpenPopup("About");
+        g_showCreditsPopup = false;
+    }
+    if (!ImGui::BeginPopupModal("About", NULL, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::PushFont(g_fontBold);
+    ImGui::Text("SRXCW Custom BGM v%s", APP_VERSION);
+    ImGui::PopFont();
+    ImGui::TextDisabled("Replace game BGM with your own music");
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+
+    ImGui::PushFont(g_fontBold);
+    ImGui::Text("Developer");
+    ImGui::PopFont();
+    ImGui::TextDisabled("  RED1");
+    ImGui::Spacing();
+
+    ImGui::PushFont(g_fontBold);
+    ImGui::Text("Special Thanks");
+    ImGui::PopFont();
+    ImGui::TextDisabled("  RyoTune - CRI Atom / ACB information (Ryo Framework)");
+    ImGui::Spacing();
+
+    ImGui::PushFont(g_fontBold);
+    ImGui::Text("Libraries");
+    ImGui::PopFont();
+    ImGui::TextDisabled("  Dear ImGui          - Omar Cornut");
+    ImGui::TextDisabled("  MinHook             - Tsuda Kagewo");
+    ImGui::TextDisabled("  SDL2                - Sam Lantinga");
+    ImGui::TextDisabled("  dr_mp3              - David Reid");
+    ImGui::TextDisabled("  dr_flac             - David Reid");
+    ImGui::TextDisabled("  stb_vorbis          - Sean Barrett");
+    ImGui::TextDisabled("  libhelix-aac        - Ahead Software / RealNetworks");
+    ImGui::TextDisabled("  XAudio2             - Microsoft");
+    ImGui::TextDisabled("  Direct3D 9          - Microsoft");
+
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static void RenderUI() {
     ImVec2 displaySize = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -1224,11 +1528,8 @@ static void RenderUI() {
         ImVec2 gp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##credits", ImVec2(22, 22));
         if (ImGui::IsItemClicked()) g_showCreditsPopup = true;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = gp.x + 11, cy = gp.y + 11;
         ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        dl->AddCircleFilled(ImVec2(cx, cy), 9.0f, col);
-        dl->AddText(ImVec2(cx - 3.5f, cy - 7.0f), ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)), "i");
+        DrawInfoIcon(ImVec2(gp.x + 11, gp.y + 11), col);
     }
 
     ImGui::SameLine(contentW - 30.0f);
@@ -1236,29 +1537,58 @@ static void RenderUI() {
         ImVec2 gp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##settings", ImVec2(22, 22));
         if (ImGui::IsItemClicked()) g_showSettingsPopup = !g_showSettingsPopup;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = gp.x + 11, cy = gp.y + 11;
         ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        float outerR = 8.0f, innerR = 4.5f, toothH = 2.5f, toothW = 2.0f;
-        int teeth = 8;
-        for (int i = 0; i < teeth; i++) {
-            float a0 = (float)i / teeth * 6.283185f;
-            float a1 = a0 + (1.5f / teeth) * 6.283185f * 0.5f;
-            float cos0 = cosf(a0), sin0 = sinf(a0);
-            float cos1 = cosf(a1), sin1 = sinf(a1);
-            ImVec2 p0(cx + cos0 * outerR, cy + sin0 * outerR);
-            ImVec2 p1(cx + cos1 * (outerR + toothH), cy + sin1 * (outerR + toothH));
-            ImVec2 p2(cx + cosf(a0 + 3.14159f / teeth) * (outerR + toothH), cy + sinf(a0 + 3.14159f / teeth) * (outerR + toothH));
-            ImVec2 p3(cx + cosf(a1 + 3.14159f / teeth * 2) * outerR, cy + sinf(a1 + 3.14159f / teeth * 2) * outerR);
-            dl->AddQuadFilled(p0, p1, p2, p3, col);
-        }
-        dl->AddCircleFilled(ImVec2(cx, cy), outerR, ImGui::GetColorU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)));
-        dl->AddCircleFilled(ImVec2(cx, cy), innerR, col);
+        DrawGearIcon(ImVec2(gp.x + 11, gp.y + 11), col);
     }
 
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
+
+    bool isActive = g_bgmActive.load() && !g_paused.load();
+    float dt = ImGui::GetIO().DeltaTime;
+    if (dt > 0.25f) dt = 0.0f;
+    if (g_showMegaManX) {
+        if (isActive) {
+            float speed = g_sprMoveCount > 0 ? SPR_MOVE_SPEED : SPR_IDLE_SPEED;
+            g_sprTimer += dt;
+            if (g_sprTimer >= speed) {
+                g_sprTimer -= speed;
+                int count = g_sprMoveCount > 0 ? g_sprMoveCount : g_sprIdleCount;
+                if (count > 0) g_sprFrame = (g_sprFrame + 1) % count;
+            }
+            g_sprWasActive = true;
+        } else {
+            if (g_sprWasActive) { g_sprFrame = 0; g_sprTimer = 0; g_sprWasActive = false; }
+            float speed = SPR_IDLE_SPEED;
+            g_sprTimer += dt;
+            if (g_sprTimer >= speed) {
+                g_sprTimer -= speed;
+                if (g_sprIdleCount > 0) g_sprFrame = (g_sprFrame + 1) % g_sprIdleCount;
+            }
+        }
+
+        {
+            ImVec2 nowPos = ImGui::GetCursorScreenPos();
+            float nowY = nowPos.y;
+            bool hasSprites = (isActive && g_sprMoveCount > 0) || (!isActive && g_sprIdleCount > 0);
+            if (hasSprites) {
+                int count = (isActive && g_sprMoveCount > 0) ? g_sprMoveCount : g_sprIdleCount;
+                int frame = g_sprFrame % count;
+                IDirect3DTexture9* tex = (isActive && g_sprMoveCount > 0) ? g_sprMove[frame] : g_sprIdle[frame];
+                if (tex) {
+                    float sx = displaySize.x - SPR_SIZE - 16.0f;
+                    float sy = nowY;
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    g_pd3dDevice->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+                    g_pd3dDevice->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+                    dl->AddImage((ImTextureID)tex, ImVec2(sx, sy), ImVec2(sx + SPR_SIZE, sy + SPR_SIZE));
+                    g_pd3dDevice->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+                    g_pd3dDevice->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+                }
+            }
+        }
+    }
 
     ImGui::TextDisabled("NOW PLAYING");
     ImGui::PushFont(g_fontBold);
@@ -1281,15 +1611,7 @@ static void RenderUI() {
                        ImVec4(0.31f, 0.71f, 1.0f, 1.0f);
     ImU32 iCol = ImGui::GetColorU32(activeCol);
 
-    auto IconBtn = [](const char* id, ImVec2 size) -> bool {
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton(id, size);
-        ImU32 bg = ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive : (ImGui::IsItemHovered() ? ImGuiCol_ButtonHovered : ImGuiCol_Button));
-        ImGui::GetWindowDrawList()->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 4.0f);
-        return ImGui::IsItemClicked();
-    };
-
-    if (IconBtn("##prev", ImVec2(btnW, btnH))) DoPrev();
+    if (IconButton("##prev", ImVec2(btnW, btnH))) DoPrev();
     {
         ImVec2 p = ImGui::GetItemRectMin();
         float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
@@ -1301,7 +1623,7 @@ static void RenderUI() {
     ImGui::SameLine();
     {
         const char* playId = (g_paused.load() || !g_bgmActive.load()) ? "##play" : "##pause";
-        if (IconBtn(playId, ImVec2(btnW, btnH))) DoPlayPause();
+        if (IconButton(playId, ImVec2(btnW, btnH))) DoPlayPause();
         ImVec2 p = ImGui::GetItemRectMin();
         float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
         float r = btnH * 0.32f;
@@ -1315,7 +1637,7 @@ static void RenderUI() {
     }
 
     ImGui::SameLine();
-    if (IconBtn("##stop", ImVec2(btnW, btnH))) DoStop();
+    if (IconButton("##stop", ImVec2(btnW, btnH))) DoStop();
     {
         ImVec2 p = ImGui::GetItemRectMin();
         float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
@@ -1324,7 +1646,7 @@ static void RenderUI() {
     }
 
     ImGui::SameLine();
-    if (IconBtn("##next", ImVec2(btnW, btnH))) DoSkip();
+    if (IconButton("##next", ImVec2(btnW, btnH))) DoSkip();
     {
         ImVec2 p = ImGui::GetItemRectMin();
         float cx = p.x + btnW * 0.5f, cy = p.y + btnH * 0.5f;
@@ -1360,25 +1682,9 @@ static void RenderUI() {
     {
         ImVec2 rp = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##refresh", ImVec2(28, ImGui::GetFrameHeight()));
-        bool hovered = ImGui::IsItemHovered();
-        bool clicked = ImGui::IsItemClicked();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = rp.x + 14, cy = rp.y + ImGui::GetFrameHeight() * 0.5f;
-        ImU32 col = ImGui::GetColorU32(hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-        float r = 7.0f;
-        dl->AddCircle(ImVec2(cx, cy), r, col, 0, 1.5f);
-        int segs = 12;
-        for (int i = 0; i < segs; i++) {
-            float a0 = (float)i / segs * 6.283185f - 1.2f;
-            float a1 = a0 + 0.35f;
-            dl->AddLine(
-                ImVec2(cx + cosf(a0) * (r - 1), cy + sinf(a0) * (r - 1)),
-                ImVec2(cx + cosf(a1) * (r - 1), cy + sinf(a1) * (r - 1)), col, 2.0f);
-        }
-        ImVec2 tip = ImVec2(cx + cosf(-1.2f) * (r + 2), cy + sinf(-1.2f) * (r + 2));
-        dl->AddTriangleFilled(tip,
-            ImVec2(tip.x - 4, tip.y + 1), ImVec2(tip.x + 1, tip.y + 5), col);
-        if (clicked) ReloadMusic();
+        ImU32 col = ImGui::GetColorU32(ImGui::IsItemHovered() ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+        DrawRefreshIcon(ImVec2(rp.x + 14, rp.y + ImGui::GetFrameHeight() * 0.5f), col);
+        if (ImGui::IsItemClicked()) ReloadMusic();
     }
 
     ImGui::Spacing();
@@ -1405,15 +1711,9 @@ static void RenderUI() {
         curTrack = g_currentTrackName;
     }
 
-    float trackListH = ImGui::GetContentRegionAvail().y - 110.0f;
+    float trackListH = ImGui::GetContentRegionAvail().y - 50.0f;
     if (trackListH < 100.0f) trackListH = 100.0f;
     ImGui::BeginChild("##TrackList", ImVec2(0, trackListH), true);
-
-    std::string lastNotified;
-    {
-        std::lock_guard<std::mutex> lock(g_trackNameMutex);
-        lastNotified = g_lastNotifiedTrack;
-    }
 
     if (currentTab == 3) {
         if (g_recentTracks.empty()) {
@@ -1432,18 +1732,13 @@ static void RenderUI() {
                         GetPool(entry.poolIndex, pool, order, pos, pn);
                         for (int j = 0; j < (int)pool->size(); j++) {
                             if (ExtractFilename((*pool)[j].filename) == entry.filename) {
-                                g_audio.StopCategoryImmediate(0);
-                                PlayTrack((*pool)[j], g_customBgmVolume.load(), 0, !g_playNewMusic);
-                                g_bgmActive.store(true);
-                                g_paused.store(false);
-                                g_playedFinish.store(false);
-                                g_activePool = entry.poolIndex;
-                                UpdateSharedStatus(entry.filename.c_str(), pn, g_customBgmVolume.load(), true);
+                                PlayTrackFromPool(entry.poolIndex, j);
                                 break;
                             }
                         }
                     }
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                 if (isPlaying) ImGui::PopStyleColor();
             }
         }
@@ -1460,17 +1755,17 @@ static void RenderUI() {
                 bool isFav = g_favorites.count(name) > 0;
 
                 ImVec2 btnPos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton(("##f" + std::to_string(currentTab) + "_" + std::to_string(i)).c_str(), ImVec2(14, ImGui::GetFrameHeight()));
+                ImGui::InvisibleButton(("##f" + std::to_string(currentTab) + "_" + std::to_string(i)).c_str(), ImVec2(18, ImGui::GetFrameHeight()));
                 if (ImGui::IsItemClicked()) {
                     if (isFav) g_favorites.erase(name); else g_favorites.insert(name);
                     SaveFavorites();
                 }
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 center = ImVec2(btnPos.x + 7, btnPos.y + ImGui::GetFrameHeight() * 0.5f);
+                ImVec2 center = ImVec2(btnPos.x + 9, btnPos.y + ImGui::GetFrameHeight() * 0.5f - 3.0f);
                 if (isFav)
-                    dl->AddCircleFilled(center, 5.0f, ImGui::GetColorU32(ImVec4(1.0f, 0.85f, 0.0f, 1.0f)));
+                    DrawStar(dl, center, 8.0f, 3.5f, ImGui::GetColorU32(ImVec4(1.0f, 0.85f, 0.0f, 1.0f)));
                 else
-                    dl->AddCircle(center, 5.0f, ImGui::GetColorU32(ImVec4(0.35f, 0.35f, 0.40f, 0.5f)));
+                    DrawStar(dl, center, 8.0f, 3.5f, ImGui::GetColorU32(ImVec4(0.35f, 0.35f, 0.40f, 0.5f)));
                 ImGui::SameLine();
 
                 std::string dur = FormatDuration((*pool)[i].durationSec);
@@ -1484,16 +1779,10 @@ static void RenderUI() {
 
                 if (ImGui::Selectable(label, false, ImGuiSelectableFlags_AllowDoubleClick)) {
                     if (g_audioInitialized.load()) {
-                        g_audio.StopCategoryImmediate(0);
-                        PlayTrack((*pool)[i], g_customBgmVolume.load(), 0, !g_playNewMusic);
-                        g_bgmActive.store(true);
-                        g_paused.store(false);
-                        g_playedFinish.store(false);
-                        g_activePool = currentTab;
-                        UpdateSharedStatus(name.c_str(), tabNames[currentTab], g_customBgmVolume.load(), true);
-                        AddRecent(name, currentTab);
+                        PlayTrackFromPool(currentTab, i);
                     }
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
                 if (isPlaying) ImGui::PopStyleColor();
             }
@@ -1506,22 +1795,22 @@ static void RenderUI() {
     ImGui::Spacing();
 
     ImGui::PushFont(g_fontMono);
-    {
+    if (ImGui::BeginTable("##HotkeyLegend", 3, ImGuiTableFlags_NoBordersInBody | ImGuiTableFlags_NoClip | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("##vol", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##skip", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##prev", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextRow();
         char buf[64];
+        ImGui::TableNextColumn();
         FormatKeyBinding(g_hotkeys[HOTKEY_VOLUP].kb, buf, sizeof(buf));
-        ImGui::TextDisabled("  %s Volume", buf);
-    }
-    ImGui::SameLine(displaySize.x * 0.37f);
-    {
-        char buf[64];
+        ImGui::TextDisabled("  %s: Volume", buf);
+        ImGui::TableNextColumn();
         FormatKeyBinding(g_hotkeys[HOTKEY_SKIP].kb, buf, sizeof(buf));
-        ImGui::TextDisabled("  %s     Skip", buf);
-    }
-    ImGui::SameLine(displaySize.x * 0.67f);
-    {
-        char buf[64];
+        ImGui::TextDisabled("  %s: Skip", buf);
+        ImGui::TableNextColumn();
         FormatKeyBinding(g_hotkeys[HOTKEY_PREV].kb, buf, sizeof(buf));
-        ImGui::TextDisabled("  %s      Prev", buf);
+        ImGui::TextDisabled("  %s: Prev", buf);
+        ImGui::EndTable();
     }
     ImGui::PopFont();
 
@@ -1534,141 +1823,9 @@ static void RenderUI() {
         }
     }
 
-    if (g_showSettingsPopup) {
-        ImGui::OpenPopup("Settings");
-        g_showSettingsPopup = false;
-    }
-
-    if (ImGui::BeginPopupModal("Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Playback");
-        ImGui::Indent();
-        if (ImGui::Checkbox("Shuffle (play next after song ends)", &g_playNewMusic)) SaveSettings();
-        if (ImGui::Checkbox("Mute when window loses focus", &g_muteOnUnfocus)) SaveSettings();
-        if (ImGui::Checkbox("Favorites only", &g_favoritesOnly)) SaveSettings();
-        ImGui::Unindent();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Appearance");
-        ImGui::Indent();
-        const char* themes[] = { "Dark", "Light", "High Contrast" };
-        if (ImGui::Combo("Theme", &g_themeIndex, themes, 3)) ApplyTheme(g_themeIndex);
-        ImGui::Unindent();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("System");
-        ImGui::Indent();
-        if (ImGui::Checkbox("Minimize to system tray", &g_minimizeToTray)) SaveSettings();
-        if (ImGui::Checkbox("Start with Windows", &g_autostartEnabled)) SetAutostart(g_autostartEnabled);
-        ImGui::Unindent();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Controls");
-        ImGui::Indent();
-        if (ImGui::Button("Configure Hotkeys...")) { g_showHotkeyWindow = true; ImGui::CloseCurrentPopup(); }
-        ImGui::Unindent();
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Favorites: %d tracks", (int)g_favorites.size());
-        ImGui::TextDisabled("Click the circle next to a track to toggle favorite");
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    if (g_showProcessPopup) {
-        g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
-        ImGui::OpenPopup("Select Process");
-        g_showProcessPopup = false;
-    }
-
-    if (ImGui::BeginPopupModal("Select Process", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        if (g_processList.empty()) {
-            ImGui::Text("No processes found.");
-        } else {
-            ImGui::Text("Select a process to inject into:");
-            ImGui::Spacing();
-            for (size_t i = 0; i < g_processList.size(); i++) {
-                char label[256];
-                snprintf(label, sizeof(label), "PID %lu - %ls", g_processList[i].pid, g_processList[i].name.c_str());
-                if (ImGui::Selectable(label)) {
-                    DoInject(g_processList[i].pid);
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-        }
-        ImGui::Separator();
-        if (ImGui::Button("Refresh")) {
-            g_processList = EnumerateProcesses(L"SonicRacingCrossWorldsSteam.exe");
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-
-    if (g_showCreditsPopup) {
-        ImGui::OpenPopup("About");
-        g_showCreditsPopup = false;
-    }
-
-    if (ImGui::BeginPopupModal("About", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushFont(g_fontBold);
-        ImGui::Text("Sonic Custom BGM v%s", APP_VERSION);
-        ImGui::PopFont();
-        ImGui::TextDisabled("Replace game BGM with your own music");
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::PushFont(g_fontBold);
-        ImGui::Text("Developer");
-        ImGui::PopFont();
-        ImGui::TextDisabled("  RED1");
-        ImGui::Spacing();
-
-        ImGui::PushFont(g_fontBold);
-        ImGui::Text("Special Thanks");
-        ImGui::PopFont();
-        ImGui::TextDisabled("  RyoTune - CRI Atom / ACB information (Ryo Framework)");
-        ImGui::Spacing();
-
-        ImGui::PushFont(g_fontBold);
-        ImGui::Text("Libraries");
-        ImGui::PopFont();
-        ImGui::TextDisabled("  Dear ImGui          - Omar Cornut");
-        ImGui::TextDisabled("  MinHook             - Tsuda Kagewo");
-        ImGui::TextDisabled("  SDL2                - Sam Lantinga");
-        ImGui::TextDisabled("  dr_mp3              - David Reid");
-        ImGui::TextDisabled("  dr_flac             - David Reid");
-        ImGui::TextDisabled("  stb_vorbis          - Sean Barrett");
-        ImGui::TextDisabled("  libhelix-aac        - Ahead Software / RealNetworks");
-        ImGui::TextDisabled("  XAudio2             - Microsoft");
-        ImGui::TextDisabled("  Direct3D 9          - Microsoft");
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        if (ImGui::Button("Close", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
+    RenderSettingsPopup();
+    RenderProcessPopup();
+    RenderCreditsPopup();
     RenderHotkeyWindow();
 }
 
@@ -1742,6 +1899,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    LogInit();
+    Log("WinMain: Starting");
     SetProcessDPIAware();
 
     HANDLE hMutex = CreateMutexA(NULL, FALSE, "SonicCustomBGM_SingleInstance");
@@ -1777,23 +1936,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         (sw - WIN_W) / 2, (sh - WIN_H) / 2, WIN_W, WIN_H, NULL, NULL, hInstance, nullptr);
 
     if (!CreateDeviceD3D(g_hWnd)) {
+        Log("WinMain: D3D init FAILED");
         CleanupDevice();
         return 1;
     }
+    Log("WinMain: D3D init OK");
 
     ShowWindow(g_hWnd, SW_SHOW);
     UpdateWindow(g_hWnd);
 
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) == 0) {
+        Log("WinMain: SDL init OK");
         for (int i = 0; i < SDL_NumJoysticks(); i++) {
             if (SDL_IsGameController(i)) {
                 g_gameController = SDL_GameControllerOpen(i);
-                if (g_gameController) break;
+                if (g_gameController) { Log("WinMain: Gamepad found"); break; }
             }
         }
-    }
+    } else { Log("WinMain: SDL init failed, continuing without gamepad"); }
 
+    Log("WinMain: ImGui init start");
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -1810,6 +1973,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     style.ScrollbarSize = 16;
     style.ScrollbarRounding = 3;
 
+    Log("WinMain: Loading fonts");
     char winDir[MAX_PATH];
     GetWindowsDirectoryA(winDir, MAX_PATH);
     std::string segoeui = std::string(winDir) + "\\Fonts\\segoeui.ttf";

@@ -40,12 +40,13 @@ static std::string GetDllDir() {
 
 static void WriteCommand(int cmd, const char* cueName, int poolId, bool allowLoop) {
     if (!g_shared) return;
-    while (InterlockedCompareExchange(&g_shared->cmdReady, 1, 0) != 0)
+    while (InterlockedCompareExchange(&g_shared->cmdReady, 0, 0) != 0)
         Sleep(1);
     g_shared->command = cmd;
     strncpy_s(g_shared->cueName, cueName, sizeof(g_shared->cueName) - 1);
     g_shared->poolId = poolId;
     g_shared->allowLoop = allowLoop;
+    MemoryBarrier();
     InterlockedExchange(&g_shared->cmdReady, 1);
 }
 

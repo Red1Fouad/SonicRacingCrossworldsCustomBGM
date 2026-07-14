@@ -20,3 +20,7 @@ settings.txt
 music/
 music_lobby/
 music_title/
+lib/openrevolution/
+src/exe/sprites_data.h
+spr_player_x_idle/
+spr_player_x_move_loop/

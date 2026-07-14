@@ -76,6 +76,30 @@ public:
         }
     }
 
+    static void TrimLeadingSilence(WavData& data, int16_t threshold = 1024) {
+        if (data.audioData.empty() || data.wfx.wBitsPerSample != 16) return;
+        int channels = data.wfx.nChannels;
+        if (channels <= 0) return;
+        int16_t* samples = reinterpret_cast<int16_t*>(data.audioData.data());
+        size_t totalFrames = data.audioData.size() / (channels * sizeof(int16_t));
+        size_t firstNonSilent = totalFrames;
+        for (size_t f = 0; f < totalFrames; f++) {
+            bool silent = true;
+            for (int ch = 0; ch < channels; ch++) {
+                int16_t s = samples[f * channels + ch];
+                if (s < 0) s = -s;
+                if (s > threshold) { silent = false; break; }
+            }
+            if (!silent) { firstNonSilent = f; break; }
+        }
+        if (firstNonSilent == 0) return;
+        if (firstNonSilent >= totalFrames) { data.audioData.clear(); return; }
+        size_t bytesPerFrame = channels * sizeof(int16_t);
+        size_t remaining = totalFrames - firstNonSilent;
+        memmove(data.audioData.data(), data.audioData.data() + firstNonSilent * bytesPerFrame, remaining * bytesPerFrame);
+        data.audioData.resize(remaining * bytesPerFrame);
+    }
+
     static bool LoadCompressed(const std::string& filename, CompressedAudio& out) {
         std::vector<uint8_t> fileData;
         if (!ReadFileIntoMemory(filename, fileData)) return false;
@@ -96,9 +120,11 @@ public:
         if (ext == ".ogg") return DecodeOggMemory(input.data, outData);
         if (ext == ".flac") return DecodeFlacMemory(input.data, outData);
         if (ext == ".adx") return DecodeAdxMemory(input.data, outData);
-        if (ext == ".brstm") return DecodeBrstmMemory(input.data, outData);
         if (ext == ".aac" || ext == ".m4a") return DecodeAacMemory(input.data, outData);
         if (ext == ".aax") return DecodeAaxMemory(input.data, outData);
+        if (ext == ".brstm" || ext == ".bcstm" || ext == ".bfstm" ||
+            ext == ".bwav" || ext == ".bcwav" || ext == ".bfwav")
+            return DecodeBrstmMemory(input.data, outData);
         return false;
     }
 
@@ -152,16 +178,45 @@ public:
             uint32_t ts = ((uint32_t)d[12] << 24) | ((uint32_t)d[13] << 16) | ((uint32_t)d[14] << 8) | d[15];
             if (sr > 0) return (float)ts / (float)sr;
         }
-        if (ext == ".brstm" && d.size() >= 0x80) {
-            auto r16 = [&](size_t o) -> uint16_t { return (uint16_t)d[o] << 8 | d[o + 1]; };
-            auto r32 = [&](size_t o) -> uint32_t { return (uint32_t)d[o] << 24 | (uint32_t)d[o + 1] << 16 | (uint32_t)d[o + 2] << 8 | d[o + 3]; };
-            uint32_t hdOff = r32(0x10);
-            if (hdOff + 4 <= d.size() && memcmp(d.data() + hdOff, "HEAD", 4) == 0) {
-                uint32_t h1o = r32(hdOff + 0x0C) + 8;
-                if (hdOff + h1o + 0x10 <= d.size()) {
-                    uint32_t srate = r16(hdOff + h1o + 4);
-                    uint32_t totalSamp = r32(hdOff + h1o + 0x0C);
-                    if (srate > 0) return (float)totalSamp / (float)srate;
+        if ((ext == ".brstm" || ext == ".bcstm" || ext == ".bfstm" ||
+             ext == ".bwav" || ext == ".bcwav" || ext == ".bfwav") && d.size() >= 0x40) {
+            const uint8_t* p = d.data();
+            size_t sz = d.size();
+            auto r32 = [&](size_t off, bool be) -> uint32_t {
+                if (off + 4 > sz) return 0;
+                if (be) return ((uint32_t)p[off]<<24)|((uint32_t)p[off+1]<<16)|((uint32_t)p[off+2]<<8)|p[off+3];
+                return p[off]|((uint32_t)p[off+1]<<8)|((uint32_t)p[off+2]<<16)|((uint32_t)p[off+3]<<24);
+            };
+            auto r16 = [&](size_t off, bool be) -> uint16_t {
+                if (off + 2 > sz) return 0;
+                return be ? ((uint16_t)p[off]<<8)|p[off+1] : p[off]|((uint16_t)p[off+1]<<8);
+            };
+            if (memcmp(p, "RSTM", 4) == 0) {
+                bool be = (p[4] == 0xFE && p[5] == 0xFF);
+                uint32_t headOff = r32(0x10, be);
+                if (headOff + 0x10 <= sz) {
+                    uint32_t h1r = r32(headOff + 0x0C, be) + 8;
+                    uint32_t sr = r16(headOff + h1r + 0x04, be);
+                    uint32_t ts = r32(headOff + h1r + 0x0C, be);
+                    if (sr > 0 && ts > 0) return (float)ts / (float)sr;
+                }
+            } else if (memcmp(p, "CSTM", 4) == 0) {
+                bool be = false;
+                uint32_t headOff = r32(0x18, be);
+                if (headOff + 0x10 <= sz) {
+                    uint32_t h1r = r32(headOff + 0x0C, be) + 8;
+                    uint32_t sr = r16(headOff + h1r + 0x04, be);
+                    uint32_t ts = r32(headOff + h1r + 0x0C, be);
+                    if (sr > 0 && ts > 0) return (float)ts / (float)sr;
+                }
+            } else if (memcmp(p, "FSTM", 4) == 0) {
+                bool be = false;
+                uint32_t headOff = r32(0x18, be);
+                if (headOff + 0x10 <= sz) {
+                    uint32_t h1r = r32(headOff + 0x0C, be) + 8;
+                    uint32_t sr = r16(headOff + h1r + 0x04, be);
+                    uint32_t ts = r32(headOff + h1r + 0x0C, be);
+                    if (sr > 0 && ts > 0) return (float)ts / (float)sr;
                 }
             }
         }
@@ -321,17 +376,17 @@ private:
         uint16_t highpassFreq = ((uint16_t)fileData[16] << 8) | fileData[17];
         uint8_t version = fileData[18];
         bool hasLoop = false;
-        uint32_t loopByteStart = 0, loopByteEnd = 0;
+        uint32_t loopSampleStart = 0, loopSampleEnd = 0;
         if (version >= 3) {
             uint32_t loopOffset = (version == 4) ? 0x24 : 0x18;
             if (loopOffset + 20 <= fileData.size()) {
                 uint32_t loopFlag = ((uint32_t)fileData[loopOffset] << 24) | ((uint32_t)fileData[loopOffset+1] << 16) |
                                     ((uint32_t)fileData[loopOffset+2] << 8) | fileData[loopOffset+3];
                 hasLoop = loopFlag != 0;
-                loopByteStart = ((uint32_t)fileData[loopOffset+4] << 24) | ((uint32_t)fileData[loopOffset+5] << 16) |
-                                ((uint32_t)fileData[loopOffset+6] << 8) | fileData[loopOffset+7];
-                loopByteEnd = ((uint32_t)fileData[loopOffset+12] << 24) | ((uint32_t)fileData[loopOffset+13] << 16) |
-                              ((uint32_t)fileData[loopOffset+14] << 8) | fileData[loopOffset+15];
+                loopSampleStart = ((uint32_t)fileData[loopOffset+4] << 24) | ((uint32_t)fileData[loopOffset+5] << 16) |
+                                  ((uint32_t)fileData[loopOffset+6] << 8) | fileData[loopOffset+7];
+                loopSampleEnd = ((uint32_t)fileData[loopOffset+12] << 24) | ((uint32_t)fileData[loopOffset+13] << 16) |
+                                ((uint32_t)fileData[loopOffset+14] << 8) | fileData[loopOffset+15];
             }
         }
         uint32_t audioOffset = offset + 4;
@@ -387,9 +442,9 @@ private:
         outData.wfx.nAvgBytesPerSec = sampleRate * channelCount * 2;
         outData.wfx.cbSize = 0;
         outData.hasLoop = hasLoop;
-        if (hasLoop && loopByteEnd > 0) {
-            outData.loopBegin = loopByteStart;
-            outData.loopLength = loopByteEnd - loopByteStart;
+        if (hasLoop && loopSampleEnd > loopSampleStart) {
+            outData.loopBegin = loopSampleStart;
+            outData.loopLength = loopSampleEnd - loopSampleStart;
             if (outData.loopBegin + outData.loopLength > samplesPerChannel)
                 outData.loopLength = (UINT32)(samplesPerChannel - outData.loopBegin);
         }
@@ -399,11 +454,14 @@ private:
     static bool DecodeBrstmMemory(const std::vector<uint8_t>& d, WavData& outData) {
         if (d.size() < 0x80) return false;
         if (memcmp(d.data(), "RSTM", 4) != 0) return false;
+
         auto r16 = [&](size_t o) -> uint16_t { return (uint16_t)d[o] << 8 | d[o + 1]; };
         auto r32 = [&](size_t o) -> uint32_t { return (uint32_t)d[o] << 24 | (uint32_t)d[o + 1] << 16 | (uint32_t)d[o + 2] << 8 | d[o + 3]; };
         auto ri16 = [&](size_t o) -> int16_t { return (int16_t)r16(o); };
+
         uint32_t hdOff = r32(0x10), dtOff = r32(0x20);
         if (hdOff + 4 > d.size() || memcmp(d.data() + hdOff, "HEAD", 4) != 0) return false;
+
         uint32_t h1o = r32(hdOff + 0x0C) + 8, h3o = r32(hdOff + 0x1C) + 8;
         uint8_t codec = d[hdOff + h1o];
         bool loop = d[hdOff + h1o + 1] != 0;
@@ -417,11 +475,14 @@ private:
         uint32_t blkSamp = r32(hdOff + h1o + 0x1C);
         uint32_t finBlkSize = r32(hdOff + h1o + 0x20);
         uint32_t finBlkSamp = r32(hdOff + h1o + 0x24);
+
         if (srate == 0 || chans == 0 || chans > 16) return false;
         if (numBlk == 0 || blkSize == 0 || blkSamp == 0) return false;
+
         uint32_t dtDataStart = dtOff + 8;
         if (aOff < dtDataStart) aOff += dtDataStart;
         if (aOff < dtDataStart) aOff = dtDataStart;
+
         outData.wfx.wFormatTag = WAVE_FORMAT_PCM;
         outData.wfx.nChannels = chans;
         outData.wfx.nSamplesPerSec = srate;
@@ -430,52 +491,73 @@ private:
         outData.wfx.nAvgBytesPerSec = srate * chans * 2;
         outData.wfx.cbSize = 0;
         outData.hasLoop = loop && loopStart < totalSamp;
-        if (outData.hasLoop) { outData.loopBegin = loopStart; outData.loopLength = totalSamp - loopStart; }
+        if (outData.hasLoop) {
+            outData.loopBegin = loopStart;
+            outData.loopLength = totalSamp - loopStart;
+        }
 
         if (codec == 2) {
             uint8_t h3ch = d[hdOff + h3o];
             if (h3ch > chans) h3ch = chans;
+
             std::vector<std::vector<int16_t>> coefs(chans, std::vector<int16_t>(16, 0));
             std::vector<int16_t> inh1(chans, 0), inh2(chans, 0);
+
             for (uint8_t ch = 0; ch < h3ch; ch++) {
-                uint32_t cio = r32(hdOff + h3o + 8 + ch * 8) + 8;
+                uint32_t cio = r32(hdOff + h3o + 8 + ch * 8);
+                cio += 8;
                 for (int i = 0; i < 16; i++)
                     coefs[ch][i] = ri16(hdOff + cio + 0x08 + i * 2);
                 inh1[ch] = ri16(hdOff + cio + 0x2C);
                 inh2[ch] = ri16(hdOff + cio + 0x2E);
             }
+
             std::vector<std::vector<int16_t>> cbuf(chans);
             for (auto& b : cbuf) b.reserve(totalSamp);
+
             for (uint32_t b = 0; b < numBlk; b++) {
                 size_t bs = (b == numBlk - 1) ? finBlkSize : blkSize;
                 size_t bsp = (b == numBlk - 1) ? finBlkSamp : blkSamp;
+
                 for (uint8_t ch = 0; ch < chans; ch++) {
                     size_t base = aOff + b * blkSize * chans + ch * blkSize;
-                    if (base >= d.size() || bs == 0 || bsp == 0) break;
+                    if (base >= d.size()) break;
+                    if (bs == 0 || bsp == 0) break;
+
                     size_t remain = std::min<size_t>(bs, d.size() - base);
                     const uint8_t* src = d.data() + base;
+
                     int32_t yn1 = (b == 0) ? inh1[ch] : cbuf[ch].back();
                     int32_t yn2 = (b == 0) ? inh2[ch] : cbuf[ch][cbuf[ch].size() - 2];
-                    size_t consumed = 0, decoded = 0;
+
+                    size_t consumed = 0;
+                    size_t decoded = 0;
+
                     while (consumed < remain && decoded < bsp) {
                         uint8_t hdr = src[consumed++];
                         int scale = 1 << (hdr & 0x0F);
                         int cix = ((hdr >> 4) & 0x0F) * 2;
                         if (cix > 14) cix = 14;
-                        int16_t c1 = coefs[ch][cix], c2 = coefs[ch][cix + 1];
+                        int16_t c1 = coefs[ch][cix];
+                        int16_t c2 = coefs[ch][cix + 1];
+
                         for (int n = 0; n < 14 && decoded < bsp && consumed < remain; n++, decoded++) {
                             int nib = (n & 1) == 0 ? (src[consumed] >> 4) & 0x0F : src[consumed++] & 0x0F;
                             if (nib >= 8) nib -= 16;
+
                             int32_t samp = ((scale * nib) << 11) + c1 * yn1 + c2 * yn2 + 1024;
                             samp >>= 11;
                             if (samp > 32767) samp = 32767;
                             if (samp < -32768) samp = -32768;
-                            yn2 = yn1; yn1 = samp;
+
+                            yn2 = yn1;
+                            yn1 = samp;
                             cbuf[ch].push_back((int16_t)samp);
                         }
                     }
                 }
             }
+
             size_t spc = cbuf[0].size();
             outData.audioData.resize(spc * chans * sizeof(int16_t));
             int16_t* pcm = (int16_t*)outData.audioData.data();
@@ -484,6 +566,7 @@ private:
                     pcm[i * chans + ch] = i < cbuf[ch].size() ? cbuf[ch][i] : 0;
             return true;
         }
+
         if (codec == 1) {
             size_t totalOut = totalSamp;
             outData.audioData.resize(totalOut * chans * sizeof(int16_t));
@@ -499,6 +582,7 @@ private:
             }
             return true;
         }
+
         if (codec == 0) {
             size_t totalOut = totalSamp;
             outData.audioData.resize(totalOut * chans * sizeof(int16_t));
@@ -514,6 +598,8 @@ private:
             }
             return true;
         }
+
+        Log("DecodeBrstm: unsupported codec %d", (int)codec);
         return false;
     }
 
