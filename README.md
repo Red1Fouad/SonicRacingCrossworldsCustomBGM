@@ -28,8 +28,6 @@ Drop your audio files into folders next to the EXE, launch the app, and play the
 | CRI AAX | `.aax` | ADX in @UTF container |
 | AAC / M4A | `.aac`, `.m4a` | ADTS and MP4 container |
 | Nintendo BRSTM | `.brstm` | DSP-ADPCM, PCM, IMA-ADPCM |
-| Nintendo BCSTM | `.bcstm` | |
-| Nintendo BFSTM | `.bfstm` | |
 
 ## Music Folders
 
