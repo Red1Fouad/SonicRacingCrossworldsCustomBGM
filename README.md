@@ -24,11 +24,13 @@ Drop your audio files into folders next to the EXE, launch the app, and play the
 | MP3 | `.mp3` | |
 | OGG Vorbis | `.ogg` | |
 | FLAC | `.flac` | |
-| CRI ADX | `.adx` | With loop points |
-| CRI AAX | `.aax` | ADX in @UTF container |
 | AAC / M4A | `.aac`, `.m4a` | ADTS and MP4 container |
-| Nintendo BRSTM | `.brstm` | DSP-ADPCM, PCM, IMA-ADPCM |
-| Nintendo BCSTM | `.bcstm` | |
+| CRI ADX | `.adx` | Loop points via vgmstream |
+| CRI AAX | `.aax` | ADX in @UTF container, loop points via vgmstream |
+| Nintendo BRSTM | `.brstm` | DSP-ADPCM, PCM, IMA-ADPCM, loop points via vgmstream |
+| Nintendo BCSTM | `.bcstm` | Via vgmstream |
+| Nintendo BWAV | `.bwav` | Via vgmstream |
+| Nintendo BCWAV | `.bcwav` | Via vgmstream |
 
 ## Music Folders
 
@@ -53,7 +55,7 @@ AnotherTrack.ogg: 0.5, 1.0
 
 - **Auto-injection** — Detects the game process and injects automatically
 - **Shuffle mode** — Plays tracks in a randomized order with weighted probability
-- **Loop mode** — Loops the current track infinitely (supports embedded loop points in ADX/BRSTM)
+- **Loop mode** — Loops the current track infinitely; ADX/BRSTM/AAX use embedded loop points via vgmstream
 - **Favorites** — Star tracks to include them in favorites-only shuffle
 - **Search & filter** — Real-time search across all tracks
 - **Volume control** — Global volume slider (0%-500%)
@@ -112,6 +114,7 @@ Produces `SonicCustomBGM.exe` and `SonicCustomBGM.dll` in the project root.
 | [dr_flac](https://github.com/mackron/dr_libs) | FLAC decoding |
 | [stb_vorbis](https://github.com/nothings/stb) | OGG Vorbis decoding |
 | [libhelix-aac](https://github.com/nicklausw/libhelix-aac) | AAC/M4A decoding |
+| [vgmstream](https://github.com/vgmstream/vgmstream) | Game audio formats (ADX, BRSTM, BCSTM, AAX, BWAV, BCWAV, and more) |
 | XAudio2 | Audio playback |
 | Direct3D 9 | Rendering |
 | WinHTTP | Update checking |
@@ -120,6 +123,7 @@ Produces `SonicCustomBGM.exe` and `SonicCustomBGM.dll` in the project root.
 
 - **Developer**: RED1
 - **Special Thanks**: RyoTune — CRI Atom / ACB information (Ryo Framework)
+- **[vgmstream](https://github.com/vgmstream/vgmstream)** — Game audio format decoding
 
 ## License
 

@@ -64,8 +64,8 @@ static void Log(const char* fmt, ...) {
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-static const char* APP_VERSION = "1.0.0";
-static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v1.0.0";
+static const char* APP_VERSION = "1.0.1";
+static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v1.0.1";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
@@ -273,7 +273,7 @@ static void LoadMusicFromDir(const std::string& dir, std::vector<CompressedAudio
     Log("LoadMusicFromDir: %s", dir.c_str());
     auto meta = ParseTrackMeta(dir);
     std::wstring wdir = Utf8ToWide(dir);
-    for (const wchar_t* ext : { L"\\*.wav", L"\\*.mp3", L"\\*.ogg", L"\\*.adx", L"\\*.brstm", L"\\*.bcstm", L"\\*.bfstm", L"\\*.bwav", L"\\*.bcwav", L"\\*.bfwav", L"\\*.flac", L"\\*.aac", L"\\*.m4a", L"\\*.aax" }) {
+    for (const wchar_t* ext : { L"\\*.wav", L"\\*.mp3", L"\\*.ogg", L"\\*.adx", L"\\*.brstm", L"\\*.bcstm", L"\\*.bwav", L"\\*.bcwav", L"\\*.flac", L"\\*.aac", L"\\*.m4a", L"\\*.aax" }) {
         WIN32_FIND_DATAW fd;
         HANDLE hFind = FindFirstFileW((wdir + ext).c_str(), &fd);
         if (hFind != INVALID_HANDLE_VALUE) {
@@ -664,8 +664,8 @@ static void PlayTrack(CompressedAudio& audio, float volume, int categoryId, bool
     if (g_skipLeadingSilence) {
         const std::string& ext = audio.extension;
         if (ext != ".adx" && ext != ".aax" && ext != ".brstm" &&
-            ext != ".bcstm" && ext != ".bfstm" && ext != ".bwav" &&
-            ext != ".bcwav" && ext != ".bfwav")
+            ext != ".bcstm" && ext != ".bwav" &&
+            ext != ".bcwav")
             AudioLoader::TrimLeadingSilence(data);
     }
     g_audio.PlayPreloaded(data, volume, categoryId, allowLoop);

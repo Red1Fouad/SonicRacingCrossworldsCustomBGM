@@ -25,6 +25,10 @@
 #define ENABLE_AAC
 #endif
 
+extern "C" {
+#include "libvgmstream.h"
+}
+
 struct WavData {
     WAVEFORMATEX wfx;
     std::vector<BYTE> audioData;
@@ -41,6 +45,61 @@ struct CompressedAudio {
     float volumeMul = 1.0f;
     float durationSec = 0.0f;
 };
+
+struct MemStreamFile {
+    const uint8_t* data;
+    int64_t size;
+    std::string name;
+};
+
+static int MemStreamFile_read(void* user_data, uint8_t* dst, int64_t offset, int length) {
+    auto* f = (MemStreamFile*)user_data;
+    if (offset < 0 || offset >= f->size) return 0;
+    int avail = (int)(f->size - offset);
+    if (length > avail) length = avail;
+    memcpy(dst, f->data + offset, length);
+    return length;
+}
+
+static int64_t MemStreamFile_get_size(void* user_data) {
+    return ((MemStreamFile*)user_data)->size;
+}
+
+static const char* MemStreamFile_get_name(void* user_data) {
+    return ((MemStreamFile*)user_data)->name.c_str();
+}
+
+static void MemStreamFile_close(libstreamfile_t* libsf) {
+    if (libsf) {
+        delete (MemStreamFile*)libsf->user_data;
+        free(libsf);
+    }
+}
+
+static libstreamfile_t* MemStreamFile_open(void* user_data, const char*) {
+    auto* f = (MemStreamFile*)user_data;
+    auto* mf = new MemStreamFile{f->data, f->size, f->name};
+    auto* sf = (libstreamfile_t*)calloc(1, sizeof(libstreamfile_t));
+    sf->user_data = mf;
+    sf->read = MemStreamFile_read;
+    sf->get_size = MemStreamFile_get_size;
+    sf->get_name = MemStreamFile_get_name;
+    sf->open = MemStreamFile_open;
+    sf->close = MemStreamFile_close;
+    return sf;
+}
+
+static libstreamfile_t* CreateMemStreamFile(const uint8_t* data, int64_t size, const std::string& name) {
+    auto* mf = new MemStreamFile{data, size, name};
+    auto* sf = (libstreamfile_t*)calloc(1, sizeof(libstreamfile_t));
+    sf->user_data = mf;
+    sf->read = MemStreamFile_read;
+    sf->get_size = MemStreamFile_get_size;
+    sf->get_name = MemStreamFile_get_name;
+    sf->open = MemStreamFile_open;
+    sf->close = MemStreamFile_close;
+    return sf;
+}
 
 class AudioLoader {
 public:
@@ -115,16 +174,14 @@ public:
 
     static bool DecodeToPcm(const CompressedAudio& input, WavData& outData) {
         const std::string& ext = input.extension;
-        if (ext == ".wav") return ReadWavFromMemory(input.data, outData);
+        if (ext == ".wav" || ext == ".adx" || ext == ".aax" ||
+            ext == ".brstm" || ext == ".bcstm" ||
+            ext == ".bwav" || ext == ".bcwav")
+            return DecodeVgmstreamMemory(input.data, input.filename, outData);
         if (ext == ".mp3") return DecodeMp3Memory(input.data, outData);
         if (ext == ".ogg") return DecodeOggMemory(input.data, outData);
         if (ext == ".flac") return DecodeFlacMemory(input.data, outData);
-        if (ext == ".adx") return DecodeAdxMemory(input.data, outData);
         if (ext == ".aac" || ext == ".m4a") return DecodeAacMemory(input.data, outData);
-        if (ext == ".aax") return DecodeAaxMemory(input.data, outData);
-        if (ext == ".brstm" || ext == ".bcstm" || ext == ".bfstm" ||
-            ext == ".bwav" || ext == ".bcwav" || ext == ".bfwav")
-            return DecodeBrstmMemory(input.data, outData);
         return false;
     }
 
@@ -178,8 +235,8 @@ public:
             uint32_t ts = ((uint32_t)d[12] << 24) | ((uint32_t)d[13] << 16) | ((uint32_t)d[14] << 8) | d[15];
             if (sr > 0) return (float)ts / (float)sr;
         }
-        if ((ext == ".brstm" || ext == ".bcstm" || ext == ".bfstm" ||
-             ext == ".bwav" || ext == ".bcwav" || ext == ".bfwav") && d.size() >= 0x40) {
+        if ((ext == ".brstm" || ext == ".bcstm" ||
+             ext == ".bwav" || ext == ".bcwav") && d.size() >= 0x40) {
             const uint8_t* p = d.data();
             size_t sz = d.size();
             auto r32 = [&](size_t off, bool be) -> uint32_t {
@@ -201,21 +258,16 @@ public:
                     if (sr > 0 && ts > 0) return (float)ts / (float)sr;
                 }
             } else if (memcmp(p, "CSTM", 4) == 0) {
-                bool be = false;
-                uint32_t headOff = r32(0x18, be);
-                if (headOff + 0x10 <= sz) {
-                    uint32_t h1r = r32(headOff + 0x0C, be) + 8;
-                    uint32_t sr = r16(headOff + h1r + 0x04, be);
-                    uint32_t ts = r32(headOff + h1r + 0x0C, be);
-                    if (sr > 0 && ts > 0) return (float)ts / (float)sr;
+                uint16_t secCount = r16(0x10, false);
+                uint32_t infoOff = 0;
+                for (uint32_t i = 0; i < secCount; i++) {
+                    size_t e = 0x14 + i * 12;
+                    if (e + 12 > sz) break;
+                    if (r16(e, false) == 0x4000) { infoOff = r32(e + 4, false); break; }
                 }
-            } else if (memcmp(p, "FSTM", 4) == 0) {
-                bool be = false;
-                uint32_t headOff = r32(0x18, be);
-                if (headOff + 0x10 <= sz) {
-                    uint32_t h1r = r32(headOff + 0x0C, be) + 8;
-                    uint32_t sr = r16(headOff + h1r + 0x04, be);
-                    uint32_t ts = r32(headOff + h1r + 0x0C, be);
+                if (infoOff + 0x30 <= sz) {
+                    uint32_t sr = r32(infoOff + 0x24, false);
+                    uint32_t ts = r32(infoOff + 0x2C, false);
                     if (sr > 0 && ts > 0) return (float)ts / (float)sr;
                 }
             }
@@ -246,47 +298,6 @@ private:
         if (fread(outData.data(), 1, sz, f) != (size_t)sz) { fclose(f); return false; }
         fclose(f);
         return true;
-    }
-
-    static bool ReadWavFromMemory(const std::vector<uint8_t>& data, WavData& outData) {
-        size_t pos = 0;
-        if (pos + 4 > data.size() || memcmp(data.data(), "RIFF", 4) != 0) return false;
-        pos += 8;
-        if (pos + 4 > data.size() || memcmp(data.data() + pos, "WAVE", 4) != 0) return false;
-        pos += 4;
-
-        bool foundFmt = false, foundData = false;
-        while (pos + 8 <= data.size() && (!foundFmt || !foundData)) {
-            char subChunkId[4];
-            memcpy(subChunkId, data.data() + pos, 4);
-            pos += 4;
-            uint32_t subChunkSize;
-            memcpy(&subChunkSize, data.data() + pos, 4);
-            pos += 4;
-
-            if (memcmp(subChunkId, "fmt ", 4) == 0) {
-                if (subChunkSize >= 18 && pos + 18 <= data.size()) {
-                    memcpy(&outData.wfx, data.data() + pos, 18);
-                    pos += subChunkSize;
-                } else if (pos + 16 <= data.size()) {
-                    memcpy(&outData.wfx, data.data() + pos, 16);
-                    outData.wfx.cbSize = 0;
-                    pos += subChunkSize;
-                } else break;
-                foundFmt = true;
-            } else if (memcmp(subChunkId, "data", 4) == 0) {
-                if (pos + subChunkSize <= data.size()) {
-                    outData.audioData.resize(subChunkSize);
-                    memcpy(outData.audioData.data(), data.data() + pos, subChunkSize);
-                    pos += subChunkSize;
-                } else break;
-                foundData = true;
-            } else {
-                pos += subChunkSize;
-            }
-            if (subChunkSize % 2 != 0) pos++;
-        }
-        return foundFmt && foundData;
     }
 
     static bool DecodeMp3Memory(const std::vector<uint8_t>& fileData, WavData& outData) {
@@ -365,242 +376,63 @@ private:
 #endif
     }
 
-    static bool DecodeAdxMemory(const std::vector<uint8_t>& fileData, WavData& outData) {
-        if (fileData.size() < 20) return false;
-        uint16_t offset = ((uint16_t)fileData[2] << 8) | fileData[3];
-        uint8_t channelCount = fileData[7];
-        uint32_t sampleRate = ((uint32_t)fileData[8] << 24) | ((uint32_t)fileData[9] << 16) |
-                              ((uint32_t)fileData[10] << 8) | fileData[11];
-        uint32_t totalSamples = ((uint32_t)fileData[12] << 24) | ((uint32_t)fileData[13] << 16) |
-                                ((uint32_t)fileData[14] << 8) | fileData[15];
-        uint16_t highpassFreq = ((uint16_t)fileData[16] << 8) | fileData[17];
-        uint8_t version = fileData[18];
-        bool hasLoop = false;
-        uint32_t loopSampleStart = 0, loopSampleEnd = 0;
-        if (version >= 3) {
-            uint32_t loopOffset = (version == 4) ? 0x24 : 0x18;
-            if (loopOffset + 20 <= fileData.size()) {
-                uint32_t loopFlag = ((uint32_t)fileData[loopOffset] << 24) | ((uint32_t)fileData[loopOffset+1] << 16) |
-                                    ((uint32_t)fileData[loopOffset+2] << 8) | fileData[loopOffset+3];
-                hasLoop = loopFlag != 0;
-                loopSampleStart = ((uint32_t)fileData[loopOffset+4] << 24) | ((uint32_t)fileData[loopOffset+5] << 16) |
-                                  ((uint32_t)fileData[loopOffset+6] << 8) | fileData[loopOffset+7];
-                loopSampleEnd = ((uint32_t)fileData[loopOffset+12] << 24) | ((uint32_t)fileData[loopOffset+13] << 16) |
-                                ((uint32_t)fileData[loopOffset+14] << 8) | fileData[loopOffset+15];
-            }
+    static bool DecodeVgmstreamMemory(const std::vector<uint8_t>& fileData, const std::string& filename, WavData& outData) {
+        if (fileData.empty()) return false;
+
+        libvgmstream_t* lib = libvgmstream_init();
+        if (!lib) return false;
+
+        std::string ext;
+        size_t dot = filename.find_last_of(".");
+        if (dot != std::string::npos) {
+            ext = filename.substr(dot);
+            for (auto& c : ext) c = (char)tolower(c);
         }
-        uint32_t audioOffset = offset + 4;
-        if (audioOffset >= fileData.size()) return false;
-        const uint8_t* encoded = fileData.data() + audioOffset;
-        size_t encodedSize = fileData.size() - audioOffset;
-        double factor = (double)highpassFreq / (double)sampleRate;
-        double a = 1.4142135623730951 - cos(6.283185307179586 * factor);
-        double b = 1.4142135623730951 - 1.0;
-        double c = (a - sqrt((a + b) * (a - b))) / b;
-        double coeff1 = 2.0 * c;
-        double coeff2 = -(c * c);
-        struct AdxDec {
-            double c1, c2; int32_t prev1 = 0, prev2 = 0;
-            int32_t Decode(int32_t sample, int32_t scale) {
-                int32_t pred = (int32_t)(c1 * prev1 + c2 * prev2);
-                int32_t result = sample * scale + pred;
-                if (result > 32767) result = 32767;
-                if (result < -32768) result = -32768;
-                prev2 = prev1; prev1 = result; return result;
-            }
-        };
-        std::vector<AdxDec> decoders(channelCount, AdxDec{coeff1, coeff2, 0, 0});
-        std::vector<std::vector<int16_t>> channelBuf(channelCount);
-        for (auto& buf : channelBuf) buf.reserve(totalSamples);
-        size_t pos = 0;
-        while (pos + 18 <= encodedSize) {
-            for (int ch = 0; ch < channelCount && pos + 18 <= encodedSize; ch++) {
-                int32_t scale = ((int32_t)encoded[pos] << 8) | encoded[pos + 1];
-                auto& dec = decoders[ch];
-                for (int i = 0; i < 16; i++) {
-                    uint8_t b = encoded[pos + 2 + i];
-                    int32_t hi = (b >> 4) & 0xF, lo = b & 0xF;
-                    if (hi & 8) hi -= 16; if (lo & 8) lo -= 16;
-                    channelBuf[ch].push_back((int16_t)dec.Decode(hi, scale));
-                    channelBuf[ch].push_back((int16_t)dec.Decode(lo, scale));
-                }
-                pos += 18;
-            }
-        }
-        if (channelBuf[0].empty()) return false;
-        size_t samplesPerChannel = channelBuf[0].size();
-        outData.audioData.resize(samplesPerChannel * channelCount * sizeof(int16_t));
-        int16_t* pcm = reinterpret_cast<int16_t*>(outData.audioData.data());
-        for (size_t i = 0; i < samplesPerChannel; i++)
-            for (int ch = 0; ch < channelCount; ch++)
-                pcm[i * channelCount + ch] = channelBuf[ch][i];
+
+        libvgmstream_config_t cfg = {};
+        cfg.force_sfmt = LIBVGMSTREAM_SFMT_PCM16;
+        cfg.ignore_loop = false;
+        if (ext == ".adx" || ext == ".brstm" || ext == ".aax")
+            cfg.force_loop = true;
+        libvgmstream_setup(lib, &cfg);
+
+        std::string name = filename.empty() ? "audio.bin" : filename;
+        libstreamfile_t* sf = CreateMemStreamFile(fileData.data(), fileData.size(), name);
+        int err = libvgmstream_open_stream(lib, sf, 0);
+        libstreamfile_close(sf);
+
+        if (err < 0) { libvgmstream_free(lib); return false; }
+
         outData.wfx.wFormatTag = WAVE_FORMAT_PCM;
-        outData.wfx.nChannels = channelCount;
-        outData.wfx.nSamplesPerSec = sampleRate;
+        outData.wfx.nChannels = (WORD)lib->format->channels;
+        outData.wfx.nSamplesPerSec = lib->format->sample_rate;
         outData.wfx.wBitsPerSample = 16;
-        outData.wfx.nBlockAlign = channelCount * 2;
-        outData.wfx.nAvgBytesPerSec = sampleRate * channelCount * 2;
+        outData.wfx.nBlockAlign = lib->format->channels * 2;
+        outData.wfx.nAvgBytesPerSec = lib->format->sample_rate * lib->format->channels * 2;
         outData.wfx.cbSize = 0;
-        outData.hasLoop = hasLoop;
-        if (hasLoop && loopSampleEnd > loopSampleStart) {
-            outData.loopBegin = loopSampleStart;
-            outData.loopLength = loopSampleEnd - loopSampleStart;
-            if (outData.loopBegin + outData.loopLength > samplesPerChannel)
-                outData.loopLength = (UINT32)(samplesPerChannel - outData.loopBegin);
+
+        if (lib->format->loop_flag) {
+            outData.hasLoop = true;
+            outData.loopBegin = (UINT32)lib->format->loop_start;
+            outData.loopLength = (UINT32)(lib->format->loop_end - lib->format->loop_start);
         }
+
+        std::vector<uint8_t> pcmBuf;
+        while (!lib->decoder->done) {
+            err = libvgmstream_render(lib);
+            if (err < 0) break;
+            if (lib->decoder->buf_bytes > 0) {
+                size_t prev = pcmBuf.size();
+                pcmBuf.resize(prev + lib->decoder->buf_bytes);
+                memcpy(pcmBuf.data() + prev, lib->decoder->buf, lib->decoder->buf_bytes);
+            }
+        }
+
+        libvgmstream_free(lib);
+
+        if (pcmBuf.empty()) return false;
+        outData.audioData = std::move(pcmBuf);
         return true;
-    }
-
-    static bool DecodeBrstmMemory(const std::vector<uint8_t>& d, WavData& outData) {
-        if (d.size() < 0x80) return false;
-        if (memcmp(d.data(), "RSTM", 4) != 0) return false;
-
-        auto r16 = [&](size_t o) -> uint16_t { return (uint16_t)d[o] << 8 | d[o + 1]; };
-        auto r32 = [&](size_t o) -> uint32_t { return (uint32_t)d[o] << 24 | (uint32_t)d[o + 1] << 16 | (uint32_t)d[o + 2] << 8 | d[o + 3]; };
-        auto ri16 = [&](size_t o) -> int16_t { return (int16_t)r16(o); };
-
-        uint32_t hdOff = r32(0x10), dtOff = r32(0x20);
-        if (hdOff + 4 > d.size() || memcmp(d.data() + hdOff, "HEAD", 4) != 0) return false;
-
-        uint32_t h1o = r32(hdOff + 0x0C) + 8, h3o = r32(hdOff + 0x1C) + 8;
-        uint8_t codec = d[hdOff + h1o];
-        bool loop = d[hdOff + h1o + 1] != 0;
-        uint8_t chans = d[hdOff + h1o + 2];
-        uint32_t srate = r16(hdOff + h1o + 4);
-        uint32_t loopStart = r32(hdOff + h1o + 8);
-        uint32_t totalSamp = r32(hdOff + h1o + 0x0C);
-        uint32_t aOff = r32(hdOff + h1o + 0x10);
-        uint32_t numBlk = r32(hdOff + h1o + 0x14);
-        uint32_t blkSize = r32(hdOff + h1o + 0x18);
-        uint32_t blkSamp = r32(hdOff + h1o + 0x1C);
-        uint32_t finBlkSize = r32(hdOff + h1o + 0x20);
-        uint32_t finBlkSamp = r32(hdOff + h1o + 0x24);
-
-        if (srate == 0 || chans == 0 || chans > 16) return false;
-        if (numBlk == 0 || blkSize == 0 || blkSamp == 0) return false;
-
-        uint32_t dtDataStart = dtOff + 8;
-        if (aOff < dtDataStart) aOff += dtDataStart;
-        if (aOff < dtDataStart) aOff = dtDataStart;
-
-        outData.wfx.wFormatTag = WAVE_FORMAT_PCM;
-        outData.wfx.nChannels = chans;
-        outData.wfx.nSamplesPerSec = srate;
-        outData.wfx.wBitsPerSample = 16;
-        outData.wfx.nBlockAlign = chans * 2;
-        outData.wfx.nAvgBytesPerSec = srate * chans * 2;
-        outData.wfx.cbSize = 0;
-        outData.hasLoop = loop && loopStart < totalSamp;
-        if (outData.hasLoop) {
-            outData.loopBegin = loopStart;
-            outData.loopLength = totalSamp - loopStart;
-        }
-
-        if (codec == 2) {
-            uint8_t h3ch = d[hdOff + h3o];
-            if (h3ch > chans) h3ch = chans;
-
-            std::vector<std::vector<int16_t>> coefs(chans, std::vector<int16_t>(16, 0));
-            std::vector<int16_t> inh1(chans, 0), inh2(chans, 0);
-
-            for (uint8_t ch = 0; ch < h3ch; ch++) {
-                uint32_t cio = r32(hdOff + h3o + 8 + ch * 8);
-                cio += 8;
-                for (int i = 0; i < 16; i++)
-                    coefs[ch][i] = ri16(hdOff + cio + 0x08 + i * 2);
-                inh1[ch] = ri16(hdOff + cio + 0x2C);
-                inh2[ch] = ri16(hdOff + cio + 0x2E);
-            }
-
-            std::vector<std::vector<int16_t>> cbuf(chans);
-            for (auto& b : cbuf) b.reserve(totalSamp);
-
-            for (uint32_t b = 0; b < numBlk; b++) {
-                size_t bs = (b == numBlk - 1) ? finBlkSize : blkSize;
-                size_t bsp = (b == numBlk - 1) ? finBlkSamp : blkSamp;
-
-                for (uint8_t ch = 0; ch < chans; ch++) {
-                    size_t base = aOff + b * blkSize * chans + ch * blkSize;
-                    if (base >= d.size()) break;
-                    if (bs == 0 || bsp == 0) break;
-
-                    size_t remain = std::min<size_t>(bs, d.size() - base);
-                    const uint8_t* src = d.data() + base;
-
-                    int32_t yn1 = (b == 0) ? inh1[ch] : cbuf[ch].back();
-                    int32_t yn2 = (b == 0) ? inh2[ch] : cbuf[ch][cbuf[ch].size() - 2];
-
-                    size_t consumed = 0;
-                    size_t decoded = 0;
-
-                    while (consumed < remain && decoded < bsp) {
-                        uint8_t hdr = src[consumed++];
-                        int scale = 1 << (hdr & 0x0F);
-                        int cix = ((hdr >> 4) & 0x0F) * 2;
-                        if (cix > 14) cix = 14;
-                        int16_t c1 = coefs[ch][cix];
-                        int16_t c2 = coefs[ch][cix + 1];
-
-                        for (int n = 0; n < 14 && decoded < bsp && consumed < remain; n++, decoded++) {
-                            int nib = (n & 1) == 0 ? (src[consumed] >> 4) & 0x0F : src[consumed++] & 0x0F;
-                            if (nib >= 8) nib -= 16;
-
-                            int32_t samp = ((scale * nib) << 11) + c1 * yn1 + c2 * yn2 + 1024;
-                            samp >>= 11;
-                            if (samp > 32767) samp = 32767;
-                            if (samp < -32768) samp = -32768;
-
-                            yn2 = yn1;
-                            yn1 = samp;
-                            cbuf[ch].push_back((int16_t)samp);
-                        }
-                    }
-                }
-            }
-
-            size_t spc = cbuf[0].size();
-            outData.audioData.resize(spc * chans * sizeof(int16_t));
-            int16_t* pcm = (int16_t*)outData.audioData.data();
-            for (size_t i = 0; i < spc; i++)
-                for (uint8_t ch = 0; ch < chans; ch++)
-                    pcm[i * chans + ch] = i < cbuf[ch].size() ? cbuf[ch][i] : 0;
-            return true;
-        }
-
-        if (codec == 1) {
-            size_t totalOut = totalSamp;
-            outData.audioData.resize(totalOut * chans * sizeof(int16_t));
-            int16_t* pcm = (int16_t*)outData.audioData.data();
-            size_t pos = 0;
-            for (uint32_t b = 0; b < numBlk && pos < totalOut * chans; b++) {
-                size_t bsp = (b == numBlk - 1) ? finBlkSamp : blkSamp;
-                for (size_t i = 0; i < bsp && pos < totalOut * chans; i++)
-                    for (uint8_t ch = 0; ch < chans; ch++) {
-                        size_t off = aOff + b * blkSize * chans + ch * blkSize + i * 2;
-                        pcm[pos++] = off + 2 <= d.size() ? ri16(off) : 0;
-                    }
-            }
-            return true;
-        }
-
-        if (codec == 0) {
-            size_t totalOut = totalSamp;
-            outData.audioData.resize(totalOut * chans * sizeof(int16_t));
-            int16_t* pcm = (int16_t*)outData.audioData.data();
-            size_t pos = 0;
-            for (uint32_t b = 0; b < numBlk && pos < totalOut * chans; b++) {
-                size_t bsp = (b == numBlk - 1) ? finBlkSamp : blkSamp;
-                for (size_t i = 0; i < bsp && pos < totalOut * chans; i++)
-                    for (uint8_t ch = 0; ch < chans; ch++) {
-                        size_t off = aOff + b * blkSize * chans + ch * blkSize + i;
-                        pcm[pos++] = off < d.size() ? (int16_t)(int8_t)d[off] * 256 : 0;
-                    }
-            }
-            return true;
-        }
-
-        Log("DecodeBrstm: unsupported codec %d", (int)codec);
-        return false;
     }
 
     static bool DecodeAacMemory(const std::vector<uint8_t>& fileData, WavData& outData) {
@@ -846,87 +678,5 @@ private:
     }
 #endif
 
-    static bool DecodeAaxMemory(const std::vector<uint8_t>& fileData, WavData& outData) {
-        if (fileData.size() < 0x20) return false;
-        if (memcmp(fileData.data(), "@UTF", 4) != 0) return false;
-        uint32_t tableSize = AacReadBE32(fileData.data() + 4) + 8;
-        if (tableSize > fileData.size()) return false;
-        uint16_t rowsOff = AacReadBE16(fileData.data() + 0x0A);
-        uint32_t stringsOff = AacReadBE32(fileData.data() + 0x0C);
-        uint32_t dataOff = AacReadBE32(fileData.data() + 0x10);
-        uint16_t numCols = AacReadBE16(fileData.data() + 0x18);
-        uint16_t rowWidth = AacReadBE16(fileData.data() + 0x1A);
-        uint32_t numRows = AacReadBE32(fileData.data() + 0x1C);
-        size_t absRows = rowsOff + 8;
-        size_t absStrings = stringsOff + 8;
-        size_t absData = dataOff + 8;
 
-        struct ColInfo { bool hasName; uint8_t type; uint32_t strOff; };
-        std::vector<ColInfo> cols(numCols);
-        size_t schemaPos = 0x20;
-        for (uint16_t c = 0; c < numCols; c++) {
-            if (schemaPos + 5 > fileData.size()) return false;
-            uint8_t info = fileData[schemaPos];
-            cols[c].hasName = (info & 0x10) != 0;
-            cols[c].type = info & 0x0F;
-            cols[c].strOff = AacReadBE32(fileData.data() + schemaPos + 1);
-            schemaPos += 5;
-        }
-        int dataColIdx = -1;
-        for (uint16_t c = 0; c < numCols; c++) {
-            if (cols[c].hasName) {
-                size_t namePos = absStrings + cols[c].strOff;
-                if (namePos + 4 <= fileData.size() && memcmp(fileData.data() + namePos, "data", 4) == 0) {
-                    dataColIdx = c; break;
-                }
-            }
-        }
-        if (dataColIdx < 0) return false;
-
-        std::vector<WavData> segments;
-        for (uint32_t row = 0; row < numRows; row++) {
-            size_t rowBase = absRows + row * rowWidth;
-            size_t colOffset = 0;
-            for (int c = 0; c < dataColIdx && c < (int)numCols; c++) {
-                switch (cols[c].type) {
-                case 0x00: case 0x01: colOffset += 1; break;
-                case 0x02: case 0x03: colOffset += 2; break;
-                case 0x04: case 0x05: case 0x08: colOffset += 4; break;
-                case 0x0A: case 0x0B: colOffset += 8; break;
-                default: colOffset += 4; break;
-                }
-            }
-            size_t vldPos = rowBase + colOffset;
-            if (vldPos + 8 > fileData.size()) continue;
-            uint32_t segOffset = AacReadBE32(fileData.data() + vldPos);
-            uint32_t segSize = AacReadBE32(fileData.data() + vldPos + 4);
-            if (absData + segOffset + segSize > fileData.size()) continue;
-            const uint8_t* segPtr = fileData.data() + absData + segOffset;
-            std::vector<uint8_t> adxData(segPtr, segPtr + segSize);
-            WavData segWav;
-            if (DecodeAdxMemory(adxData, segWav))
-                segments.push_back(std::move(segWav));
-        }
-        if (segments.empty()) return false;
-        outData.wfx = segments[0].wfx;
-        outData.hasLoop = false;
-        size_t totalSamples = 0;
-        for (auto& seg : segments) {
-            size_t segSamples = seg.audioData.size() / (seg.wfx.nChannels * (seg.wfx.wBitsPerSample / 8));
-            if (seg.hasLoop) {
-                outData.hasLoop = true;
-                outData.loopBegin = (UINT32)totalSamples + seg.loopBegin;
-                outData.loopLength = seg.loopLength;
-            }
-            totalSamples += segSamples;
-        }
-        size_t bytesPerSample = outData.wfx.nChannels * (outData.wfx.wBitsPerSample / 8);
-        outData.audioData.resize(totalSamples * bytesPerSample);
-        size_t writePos = 0;
-        for (auto& seg : segments) {
-            memcpy(outData.audioData.data() + writePos, seg.audioData.data(), seg.audioData.size());
-            writePos += seg.audioData.size();
-        }
-        return true;
-    }
 };
