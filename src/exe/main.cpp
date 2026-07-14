@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <winhttp.h>
 #include <shellapi.h>
 #include <xaudio2.h>
 #include <d3d9.h>
@@ -59,11 +60,12 @@ static void Log(const char* fmt, ...) {
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "SDL2.lib")
+#pragma comment(lib, "winhttp.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 static const char* APP_VERSION = "1.0.0";
-static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v" "0.1.1";
+static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v1.0.0";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
@@ -137,6 +139,8 @@ static NOTIFYICONDATAA g_nid = {};
 static HICON g_trayIcon = nullptr;
 static std::string g_lastNotifiedTrack;
 static std::atomic<bool> g_settingsLoaded{ false };
+static std::atomic<bool> g_updateAvailable{ false };
+static std::string g_latestVersion;
 
 struct RecentEntry { std::string filename; int poolIndex; };
 static std::vector<RecentEntry> g_recentTracks;
@@ -1523,6 +1527,18 @@ static void RenderUI() {
     }
     ImGui::PopFont();
 
+    if (g_updateAvailable.load()) {
+        ImGui::PushFont(g_fontBold);
+        ImGui::TextColored(ImVec4(0.31f, 0.78f, 0.47f, 1.0f), "Update available: v%s", g_latestVersion.c_str());
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.31f, 0.78f, 0.47f, 1.0f));
+        if (ImGui::SmallButton("Open download page")) {
+            ShellExecuteA(NULL, "open", "https://github.com/Red1Fouad/SonicRacingCrossworldsCustomBGM/releases/latest", NULL, NULL, SW_SHOWNORMAL);
+        }
+        ImGui::PopStyleColor();
+    }
+
     ImGui::SameLine(contentW - 60.0f);
     {
         ImVec2 gp = ImGui::GetCursorScreenPos();
@@ -1898,6 +1914,57 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcA(hWnd, msg, wParam, lParam);
 }
 
+static bool CompareVersions(const std::string& a, const std::string& b) {
+    auto parse = [](const std::string& v, int& ma, int& mi, int& pa) {
+        ma = mi = pa = 0;
+        sscanf(v.c_str(), "%d.%d.%d", &ma, &mi, &pa);
+    };
+    int a1, a2, a3, b1, b2, b3;
+    parse(a, a1, a2, a3);
+    parse(b, b1, b2, b3);
+    if (a1 != b1) return a1 > b1;
+    if (a2 != b2) return a2 > b2;
+    return a3 > b3;
+}
+
+static void CheckForUpdateThread() {
+    HINTERNET hSession = WinHttpOpen(L"SRXCW-CustomBGM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return;
+    HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/repos/Red1Fouad/SonicRacingCrossworldsCustomBGM/releases/latest", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return; }
+    BOOL sent = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!sent || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        return;
+    }
+    std::string body;
+    BYTE buf[4096];
+    DWORD bytesRead = 0;
+    while (WinHttpReadData(hRequest, buf, sizeof(buf), &bytesRead) && bytesRead > 0) {
+        body.append((char*)buf, bytesRead);
+        bytesRead = 0;
+    }
+    WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+
+    size_t tagPos = body.find("\"tag_name\":\"");
+    if (tagPos == std::string::npos) return;
+    tagPos += 12;
+    size_t tagEnd = body.find("\"", tagPos);
+    if (tagEnd == std::string::npos) return;
+    std::string tag = body.substr(tagPos, tagEnd - tagPos);
+    if (!tag.empty() && tag[0] == 'v') tag = tag.substr(1);
+
+    if (CompareVersions(tag, APP_VERSION)) {
+        g_latestVersion = tag;
+        g_updateAvailable = true;
+        Log("Update check: v%s available (current: %s)", tag.c_str(), APP_VERSION);
+    } else {
+        Log("Update check: up to date (v%s)", APP_VERSION);
+    }
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     LogInit();
     Log("WinMain: Starting");
@@ -1994,6 +2061,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     std::thread(AudioThread).detach();
     std::thread(AutoInjectThread).detach();
+    std::thread(CheckForUpdateThread).detach();
 
     auto lastHotkeyCheck = std::chrono::steady_clock::now();
     auto lastMuteCheck = std::chrono::steady_clock::now();
