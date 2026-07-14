@@ -14,6 +14,11 @@ struct ActiveVoice {
     int categoryId;
     bool isBgm;
     bool isFadingOut = false;
+    UINT32 totalSamples = 0;
+    bool isLooping = false;
+    UINT32 loopBegin = 0;
+    UINT32 loopLength = 0;
+    UINT32 sampleRate = 44100;
 };
 
 class AudioEngine {
@@ -27,6 +32,7 @@ private:
 
 public:
     std::function<void()> OnTrackFinished;
+    std::function<void(const char*)> LogMsg;
 
     ~AudioEngine() {
         StopAll();
@@ -55,6 +61,7 @@ public:
                     it->pVoice->GetVolume(&vol);
                     vol -= 0.02f;
                     if (vol <= 0.0f) {
+                        if (LogMsg) { char buf[256]; snprintf(buf, sizeof(buf), "Update: fadingOut voice destroyed, isBgm=%d", it->isBgm); LogMsg(buf); }
                         it->pVoice->Stop();
                         it->pVoice->FlushSourceBuffers();
                         it->pVoice->DestroyVoice();
@@ -69,6 +76,7 @@ public:
                 it->pVoice->GetState(&state);
                 if (state.BuffersQueued == 0) {
                     bool wasBgm = it->isBgm && !it->isFadingOut;
+                    if (LogMsg) { char buf[256]; snprintf(buf, sizeof(buf), "Update: BuffersQueued=0, isBgm=%d, isFadingOut=%d, wasBgm=%d", it->isBgm, it->isFadingOut, wasBgm); LogMsg(buf); }
                     it->pVoice->DestroyVoice();
                     delete[] it->pBuffer;
                     it = m_voices.erase(it);
@@ -104,10 +112,14 @@ public:
 
     void StopCategory(int catId) {
         std::lock_guard<std::mutex> lock(m_mutex);
+        int count = 0;
         for (auto& v : m_voices) {
-            if (v.categoryId == catId)
+            if (v.categoryId == catId) {
                 v.isFadingOut = true;
+                count++;
+            }
         }
+        if (LogMsg) { char buf[128]; snprintf(buf, sizeof(buf), "StopCategory(%d): marked %d voices fading", catId, count); LogMsg(buf); }
     }
 
     void StopCategoryImmediate(int catId) {
@@ -139,6 +151,36 @@ public:
             if (v.categoryId == catId && !v.isFadingOut)
                 v.pVoice->Start(0);
         }
+    }
+
+    bool GetPlaybackProgress(float& outProgress, float& outSeconds, float& outDuration) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& v : m_voices) {
+            if (v.isBgm && !v.isFadingOut) {
+                XAUDIO2_VOICE_STATE state;
+                v.pVoice->GetState(&state);
+                float rate = (float)v.sampleRate;
+                if (rate <= 0.0f) rate = 44100.0f;
+                UINT64 played = state.SamplesPlayed;
+                if (v.isLooping && v.loopLength > 0) {
+                    UINT64 loopRegion = played - v.loopBegin;
+                    UINT32 posInLoop = (loopRegion < (UINT64)v.loopLength) ? (UINT32)loopRegion : (UINT32)(loopRegion % v.loopLength);
+                    outSeconds = (float)posInLoop / rate;
+                    outDuration = (float)v.loopLength / rate;
+                    outProgress = (float)posInLoop / (float)v.loopLength;
+                } else {
+                    outSeconds = (float)played / rate;
+                    outDuration = (float)v.totalSamples / rate;
+                    outProgress = (v.totalSamples > 0) ? (float)played / (float)v.totalSamples : 0.0f;
+                }
+                if (outProgress > 1.0f) outProgress = 1.0f;
+                return true;
+            }
+        }
+        outProgress = 0.0f;
+        outSeconds = 0.0f;
+        outDuration = 0.0f;
+        return false;
     }
 
     void PlayPreloaded(const WavData& data, float volume, int categoryId, bool allowLoop = true) {
@@ -176,7 +218,13 @@ public:
         pSourceVoice->Start(0);
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_voices.push_back({ pSourceVoice, persistentBuffer, categoryId, isBgm, false });
+            UINT32 bytesPerSample = data.wfx.nChannels * (data.wfx.wBitsPerSample / 8);
+            UINT32 totalSamp = (bytesPerSample > 0) ? buffer.AudioBytes / bytesPerSample : 0;
+            bool looping = (buffer.LoopCount != 0);
+            UINT32 lb = looping ? (UINT32)buffer.LoopBegin : 0;
+            UINT32 ll = looping ? (UINT32)buffer.LoopLength : 0;
+            UINT32 sr = data.wfx.nSamplesPerSec > 0 ? data.wfx.nSamplesPerSec : 44100;
+            m_voices.push_back({ pSourceVoice, persistentBuffer, categoryId, isBgm, false, totalSamp, looping, lb, ll, sr });
         }
     }
 };

@@ -748,17 +748,19 @@ static void DoPrev() {
 }
 
 static void OnTrackFinished() {
-    if (g_playedFinish.load()) return;
+    Log("OnTrackFinished: called, g_playNewMusic=%d, g_activePool=%d", g_playNewMusic ? 1 : 0, g_activePool);
     g_bgmActive.store(false);
     if (!g_playNewMusic) {
+        Log("OnTrackFinished: shuffle off, stopping");
         UpdateSharedStatus("(none)", "BGM", g_customBgmVolume.load(), false);
         return;
     }
     std::vector<CompressedAudio>* pool; std::vector<int>* order; int* pos; const char* poolName;
     GetPool(g_activePool, pool, order, pos, poolName);
-    if (pool->empty()) return;
+    if (pool->empty()) { Log("OnTrackFinished: pool '%s' empty", poolName); return; }
     int idx = GetNextIndex(*pool, *order, *pos);
-    if (idx < 0) return;
+    if (idx < 0) { Log("OnTrackFinished: GetNextIndex returned %d (pool size=%zu, pos=%d)", idx, pool->size(), *pos); return; }
+    Log("OnTrackFinished: playing idx=%d file='%s'", idx, ExtractFilename((*pool)[idx].filename).c_str());
     PlayTrack((*pool)[idx], g_customBgmVolume.load(), 0, false);
     g_bgmActive.store(true);
     std::string name = ExtractFilename((*pool)[idx].filename);
@@ -783,6 +785,7 @@ static void AudioThread() {
                     GetPool(poolId, pool, order, pos, poolName);
                     if (!pool->empty()) {
                         if (!(poolId == g_activePool && g_bgmActive.load())) {
+                            Log("AudioThread: cmd=1 START pool=%d(%s) allowLoop=%d", poolId, poolName, allowLoop);
                             g_audio.StopCategory(0);
                             g_activePool = poolId;
                             g_playedFinish.store(false);
@@ -792,21 +795,35 @@ static void AudioThread() {
                                 std::string name = ExtractFilename((*pool)[idx].filename);
                                 NotifyTrackPlaying(name.c_str(), poolName, poolId, vol);
                             }
+                        } else {
+                            Log("AudioThread: cmd=1 SKIPPED (pool=%d already active)", poolId);
                         }
                     }
                 } else if (cmd == 3) {
-                    g_audio.StopCategory(0);
-                    g_bgmActive.store(false);
-                    g_playedFinish.store(true);
-                    g_paused.store(false);
-                    UpdateSharedStatus("(none)", "BGM", vol, false);
+                    Log("AudioThread: cmd=3 SE_FINISH g_playNewMusic=%d", g_playNewMusic ? 1 : 0);
+                    if (g_playNewMusic) {
+                        g_playedFinish.store(true);
+                    } else {
+                        g_audio.StopCategory(0);
+                        g_bgmActive.store(false);
+                        g_playedFinish.store(true);
+                        g_paused.store(false);
+                        UpdateSharedStatus("(none)", "BGM", vol, false);
+                    }
                 } else if (cmd == 2) {
-                    g_audio.StopCategory(0);
-                    g_bgmActive.store(false);
-                    g_paused.store(false);
-                    UpdateSharedStatus("(none)", "BGM", vol, false);
+                    Log("AudioThread: cmd=2 STOP_CUSTOM g_playNewMusic=%d g_bgmActive=%d", g_playNewMusic ? 1 : 0, g_bgmActive.load() ? 1 : 0);
+                    if (g_playNewMusic) {
+                        Log("AudioThread: cmd=2 SKIPPED (shuffle on, letting track finish)");
+                    } else {
+                        g_audio.StopCategory(0);
+                        g_bgmActive.store(false);
+                        g_paused.store(false);
+                        UpdateSharedStatus("(none)", "BGM", vol, false);
+                    }
                 }
             }
+        }
+        if (g_audioInitialized.load()) {
             g_audio.Update();
         }
         Sleep(10);
@@ -866,6 +883,7 @@ static void InitAudio() {
     if (g_audio.Init()) {
         Log("InitAudio: Audio engine initialized OK");
         g_audio.OnTrackFinished = OnTrackFinished;
+        g_audio.LogMsg = [](const char* msg) { Log("AudioEngine: %s", msg); };
         g_audioInitialized.store(true);
     } else { Log("InitAudio: Audio engine init FAILED"); }
     g_settingsLoaded.store(true);
@@ -1614,6 +1632,32 @@ static void RenderUI() {
     ImGui::PopFont();
 
     ImGui::TextDisabled("Pool: %s", (inj && snap.poolName[0]) ? snap.poolName : "--");
+
+    ImGui::Spacing();
+
+    {
+        float progress = 0.0f, elapsed = 0.0f, duration = 0.0f;
+        bool hasProgress = g_audioInitialized.load() && g_audio.GetPlaybackProgress(progress, elapsed, duration);
+        float barW = 340.0f;
+        ImGui::SetCursorPosX((displaySize.x - barW) / 2.0f);
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 3));
+        ImGui::PushItemWidth(barW);
+        char overlay[32];
+        if (hasProgress && duration > 0.0f) {
+            int em = (int)elapsed / 60;
+            int es = (int)elapsed % 60;
+            int dm = (int)duration / 60;
+            int ds = (int)duration % 60;
+            snprintf(overlay, sizeof(overlay), "%d:%02d / %d:%02d", em, es, dm, ds);
+        } else {
+            snprintf(overlay, sizeof(overlay), "--:-- / --:--");
+        }
+        ImGui::ProgressBar(hasProgress ? progress : 0.0f, ImVec2(barW, 0), overlay);
+        ImGui::PopItemWidth();
+        ImGui::PopStyleVar(2);
+    }
 
     ImGui::Spacing();
 
