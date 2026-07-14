@@ -107,11 +107,10 @@ static void InitThread() {
     };
 
     cb.onSeFinish = []() {
-        bool expected = false;
-        if (g_playedFinish.compare_exchange_strong(expected, true)) {
-            if (fpCategorySetVolume) fpCategorySetVolume(0, g_originalBgmVolume);
-            g_activePool = 0;
+        if (g_bgmActive.load()) {
             g_bgmActive.store(false);
+            g_activePool = 0;
+            if (fpCategorySetVolume) fpCategorySetVolume(0, g_originalBgmVolume);
             WriteCommand(3, "SE_FINISH", 0, false);
             std::cout << "[Hook] SE_FINISH -> Custom BGM stopped" << std::endl;
         }

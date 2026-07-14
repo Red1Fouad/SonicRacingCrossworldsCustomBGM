@@ -64,8 +64,8 @@ static void Log(const char* fmt, ...) {
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-static const char* APP_VERSION = "1.0.1";
-static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v1.0.1";
+static const char* APP_VERSION = "1.0.2";
+static const char* WINDOW_TITLE = "Sonic Racing CrossWorlds Custom BGM v1.0.2";
 static const int WIN_W = 720;
 static const int WIN_H = 740;
 #define WM_APP_GONE (WM_APP + 2)
@@ -800,26 +800,18 @@ static void AudioThread() {
                         }
                     }
                 } else if (cmd == 3) {
-                    Log("AudioThread: cmd=3 SE_FINISH g_playNewMusic=%d", g_playNewMusic ? 1 : 0);
-                    if (g_playNewMusic) {
-                        g_playedFinish.store(true);
-                    } else {
-                        g_audio.StopCategory(0);
-                        g_bgmActive.store(false);
-                        g_playedFinish.store(true);
-                        g_paused.store(false);
-                        UpdateSharedStatus("(none)", "BGM", vol, false);
-                    }
+                    Log("AudioThread: cmd=3 SE_FINISH");
+                    g_audio.StopCategory(0);
+                    g_bgmActive.store(false);
+                    g_playedFinish.store(true);
+                    g_paused.store(false);
+                    UpdateSharedStatus("(none)", "BGM", vol, false);
                 } else if (cmd == 2) {
                     Log("AudioThread: cmd=2 STOP_CUSTOM g_playNewMusic=%d g_bgmActive=%d", g_playNewMusic ? 1 : 0, g_bgmActive.load() ? 1 : 0);
-                    if (g_playNewMusic) {
-                        Log("AudioThread: cmd=2 SKIPPED (shuffle on, letting track finish)");
-                    } else {
-                        g_audio.StopCategory(0);
-                        g_bgmActive.store(false);
-                        g_paused.store(false);
-                        UpdateSharedStatus("(none)", "BGM", vol, false);
-                    }
+                    g_audio.StopCategory(0);
+                    g_bgmActive.store(false);
+                    g_paused.store(false);
+                    UpdateSharedStatus("(none)", "BGM", vol, false);
                 }
             }
         }

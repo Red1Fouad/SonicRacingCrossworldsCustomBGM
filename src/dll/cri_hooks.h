@@ -85,8 +85,7 @@ static void Hook_SetCueName(void* player, void* acb, const char* cueName) {
     char safeName[256];
     if (SafeReadString(cueName, safeName, sizeof(safeName))) {
         std::lock_guard<std::mutex> lock(g_playerMutex);
-        if (g_playerCueNames.size() <= 500)
-            g_playerCueNames[player] = safeName;
+        g_playerCueNames[player] = safeName;
         if (strncmp(safeName, "BGM_", 4) == 0 || strncmp(safeName, "SE_FINISH", 9) == 0) {
             bool blocked = (strcmp(safeName, "BGM_MONSTERTRUCK_01") == 0 || strcmp(safeName, "BGM_TOP_MENU") == 0 ||
                 strncmp(safeName, "BGM_CHARASELECT_", 16) == 0 || strncmp(safeName, "BGM_GARAGE_", 11) == 0 ||
