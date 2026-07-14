@@ -1929,16 +1929,20 @@ static bool CompareVersions(const std::string& a, const std::string& b) {
 
 static void CheckForUpdateThread() {
     HINTERNET hSession = WinHttpOpen(L"SRXCW-CustomBGM/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return;
+    if (!hSession) { Log("Update check: WinHttpOpen failed %lu", GetLastError()); return; }
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(hSession, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
     HINTERNET hConnect = WinHttpConnect(hSession, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return; }
+    if (!hConnect) { Log("Update check: WinHttpConnect failed %lu", GetLastError()); WinHttpCloseHandle(hSession); return; }
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", L"/repos/Red1Fouad/SonicRacingCrossworldsCustomBGM/releases/latest", NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return; }
-    BOOL sent = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-    if (!sent || !WinHttpReceiveResponse(hRequest, NULL)) {
-        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
-        return;
-    }
+    if (!hRequest) { Log("Update check: WinHttpOpenRequest failed %lu", GetLastError()); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return; }
+    const wchar_t* headers = L"Accept: application/json";
+    BOOL sent = WinHttpSendRequest(hRequest, headers, -1, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!sent) { Log("Update check: WinHttpSendRequest failed %lu", GetLastError()); WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return; }
+    if (!WinHttpReceiveResponse(hRequest, NULL)) { Log("Update check: WinHttpReceiveResponse failed %lu", GetLastError()); WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return; }
+    DWORD statusCode = 0, statusSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+    Log("Update check: HTTP %lu", statusCode);
     std::string body;
     BYTE buf[4096];
     DWORD bytesRead = 0;
@@ -1948,13 +1952,20 @@ static void CheckForUpdateThread() {
     }
     WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
 
-    size_t tagPos = body.find("\"tag_name\":\"");
-    if (tagPos == std::string::npos) return;
-    tagPos += 12;
-    size_t tagEnd = body.find("\"", tagPos);
-    if (tagEnd == std::string::npos) return;
-    std::string tag = body.substr(tagPos, tagEnd - tagPos);
+    Log("Update check: response length %zu", body.size());
+    if (body.size() < 50) { Log("Update check: response too short"); return; }
+
+    size_t tagPos = body.find("\"tag_name\"");
+    if (tagPos == std::string::npos) { Log("Update check: tag_name not found in response"); Log("Update check: %.200s", body.c_str()); return; }
+    size_t colonPos = body.find(':', tagPos);
+    size_t quoteStart = body.find('"', colonPos);
+    if (quoteStart == std::string::npos) return;
+    quoteStart++;
+    size_t quoteEnd = body.find('"', quoteStart);
+    if (quoteEnd == std::string::npos) return;
+    std::string tag = body.substr(quoteStart, quoteEnd - quoteStart);
     if (!tag.empty() && tag[0] == 'v') tag = tag.substr(1);
+    Log("Update check: remote tag '%s', local '%s'", tag.c_str(), APP_VERSION);
 
     if (CompareVersions(tag, APP_VERSION)) {
         g_latestVersion = tag;
