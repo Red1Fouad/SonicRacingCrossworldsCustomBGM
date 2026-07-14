@@ -1,3 +1,5 @@
+# !!! YOU MUST DELETE THE UE4SS MOD "AudioDLL" BEFORE USING THIS TOOL. YOU CAN IGNORE THIS WARNING IF YOU DID NOT DOWNLOAD IT.
+
 # Sonic Racing CrossWorlds Custom BGM
 
 Replace the in-game music in **Sonic Racing CrossWorlds** with your own tracks.
